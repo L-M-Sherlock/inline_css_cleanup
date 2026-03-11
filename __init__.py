@@ -102,7 +102,7 @@ class SelectorDeduper:
                 i += 2
                 continue
 
-            if ch in ("\"", "'"):
+            if ch in ('"', "'"):
                 in_string = ch
                 i += 1
                 continue
@@ -260,10 +260,12 @@ def _cleanup_model(col, model, fields: list[str], marker_start: str, marker_end:
         processed += 1
         if processed % 200 == 0 or processed == total:
             mw.taskman.run_on_main(
-                lambda count=processed, total=total, name=model["name"]: mw.progress.update(
-                    label=f"Inline CSS Cleanup — {name} ({count}/{total})",
-                    value=count,
-                    max=total,
+                lambda count=processed, total=total, name=model["name"]: (
+                    mw.progress.update(
+                        label=f"Inline CSS Cleanup — {name} ({count}/{total})",
+                        value=count,
+                        max=total,
+                    )
                 )
             )
             if mw.progress.want_cancel():
@@ -336,10 +338,10 @@ def _run_cleanup(col) -> CleanupResult:
 def _on_cleanup_done(result: CleanupResult) -> None:
     def fmt_bytes(n: int) -> str:
         if n >= 1024 * 1024:
-            return f\"{n / (1024 * 1024):.2f} MB\"
+            return f"{n / (1024 * 1024):.2f} MB"
         if n >= 1024:
-            return f\"{n / 1024:.2f} KB\"
-        return f\"{n} B\"
+            return f"{n / 1024:.2f} KB"
+        return f"{n} B"
 
     lines: list[str] = []
     for name, s in result.summaries:
@@ -377,7 +379,9 @@ def on_run_cleanup() -> None:
         if not ok:
             return
 
-    CollectionOp(parent=mw, op=_run_cleanup).success(_on_cleanup_done).run_in_background()
+    CollectionOp(parent=mw, op=_run_cleanup).success(
+        _on_cleanup_done
+    ).run_in_background()
 
 
 def setup() -> None:
