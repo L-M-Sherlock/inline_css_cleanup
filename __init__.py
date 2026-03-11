@@ -364,6 +364,7 @@ def _on_cleanup_done(result: CleanupResult) -> None:
         lines.append(f"  CSS updated in template: {s['css_updated']}")
         lines.append("")
 
+    lines.append("After cleanup, run Tools → Check Database to shrink the collection.")
     showInfo("\n".join(lines).strip())
 
 

@@ -25,6 +25,7 @@ size limits.
 1. **Tools → Inline CSS Cleanup**
 2. Confirm the prompt
 3. Review the summary dialog
+4. Run **Check Database** to shrink the collection file after cleanup
 
 ## Configuration
 
