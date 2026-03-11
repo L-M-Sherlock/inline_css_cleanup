@@ -42,7 +42,7 @@ OUT_FILE="$OUT_DIR_ABS/${PKG_NAME}.ankiaddon"
 (
   cd "$ADDON_DIR"
   # -q for quiet, -r recurse, -X no extra file attributes
-  zip -q -X "$OUT_FILE" __init__.py manifest.json config.json
+  zip -q -X "$OUT_FILE" __init__.py manifest.json config.json config.md README.md
 )
 
 echo "Wrote $OUT_FILE"
