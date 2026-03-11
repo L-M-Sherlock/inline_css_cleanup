@@ -16,6 +16,14 @@ size limits.
 
 ## Install
 
+Option A — AnkiWeb code:
+
+1. In Anki: **Tools → Add-ons → Get Add-ons…**
+2. Enter the code `465508076`
+3. Restart Anki
+
+Option B — Install from file:
+
 1. Download `inline-css-cleanup.ankiaddon`
 2. In Anki: **Tools → Add-ons → Install from file…**
 3. Select the `.ankiaddon` file and restart Anki
@@ -26,6 +34,10 @@ size limits.
 2. Confirm the prompt
 3. Review the summary dialog
 4. Run **Check Database** to shrink the collection file after cleanup
+
+## Example Screenshot
+
+![Example](assets/example.png)
 
 ## Configuration
 
