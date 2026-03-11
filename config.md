@@ -59,6 +59,13 @@ Whether to show a confirmation dialog before running.
   with the existing marker block (old rules keep priority).
 - **Idempotent**: running again with no new inline CSS will not change Styling.
 
+## User Files
+
+Extracted CSS is stored at `user_files/extracted_css.css`. Files under
+`user_files/` are preserved during add-on upgrades, while other add-on files are
+replaced. A `user_files/README.txt` is included in the package to ensure the
+folder is created on install.
+
 ## Example Config
 
 ```json

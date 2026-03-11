@@ -3,11 +3,11 @@
 
 from __future__ import annotations
 
-import re
+from dataclasses import dataclass
+from pathlib import Path
 from collections import OrderedDict
 from typing import Iterable
-
-from dataclasses import dataclass
+import re
 
 from anki.collection import OpChanges
 from aqt import mw
@@ -186,6 +186,14 @@ def _get_config() -> dict:
     return config
 
 
+def _user_files_dir() -> Path:
+    return Path(mw.addonManager.addonsFolder(__name__)) / "user_files"
+
+
+def _user_css_path() -> Path:
+    return _user_files_dir() / "extracted_css.css"
+
+
 def _merge_css(existing: str, new_css: str, marker_start: str, marker_end: str) -> str:
     existing = existing or ""
     start_re = re.escape(marker_start)
@@ -280,8 +288,27 @@ def _cleanup_model(col, model, fields: list[str], marker_start: str, marker_end:
         changes_list.append(col.update_notes(notes_to_update))
 
     new_css = deduper.render()
+
+    # Merge extracted CSS into user_files for persistence across upgrades.
+    user_css_path = _user_css_path()
+    existing_user_css = ""
+    if user_css_path.exists():
+        existing_user_css = user_css_path.read_text(encoding="utf-8")
+
+    merged_user_css = existing_user_css
+    if new_css.strip():
+        user_deduper = SelectorDeduper()
+        if existing_user_css.strip():
+            user_deduper.add_css(existing_user_css)
+        user_deduper.add_css(new_css)
+        merged_user_css = user_deduper.render()
+
+    if merged_user_css != existing_user_css:
+        user_css_path.parent.mkdir(parents=True, exist_ok=True)
+        user_css_path.write_text(merged_user_css, encoding="utf-8")
+
     existing_css = model.get("css", "")
-    merged_css = _merge_css(existing_css, new_css, marker_start, marker_end)
+    merged_css = _merge_css(existing_css, merged_user_css, marker_start, marker_end)
     css_updated = merged_css != existing_css
     if css_updated:
         model["css"] = merged_css

@@ -60,6 +60,8 @@ Quick defaults (from `config.json`):
 - The add-on only edits CSS inside the marker block. Your other Styling remains untouched.
 - Re-running is safe and idempotent: if no new inline CSS exists, nothing changes.
 - Consider backing up your collection before the first run.
+- Extracted CSS is stored in `user_files/extracted_css.css` and merged on each run.
+- Removing CSS from fields means those fields will lose styling in the **card browser**, because the CSS now lives in the template and only applies during card rendering. If you want styled fields in the browser, install the CSS Injector add-on (`https://ankiweb.net/shared/info/181103283`) and paste the contents of `user_files/extracted_css.css` into its `field.css`. You can find `extracted_css.css` by navigating to the add‑on folder (Tools → Add‑ons → Inline CSS Cleanup → click **View Files**).
 
 ## License
 
