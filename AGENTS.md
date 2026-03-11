@@ -38,6 +38,7 @@ There is no automated test suite. Manual testing is expected in Anki.
 
 - Current history only has an initial commit; no strict convention is established.
 - Use short, imperative summaries (e.g., `Fix CSS merge on rerun`).
+- Run `uv run ruff format .` before each commit.
 - PRs should include:
   - A summary of behavior changes.
   - Any manual test steps and results.
