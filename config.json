@@ -1,0 +1,7 @@
+{
+  "note_types": ["Lapis"],
+  "fields": ["Glossary", "MainDefinition"],
+  "css_marker_start": "/* Inline CSS Cleanup: BEGIN */",
+  "css_marker_end": "/* Inline CSS Cleanup: END */",
+  "confirm_before_run": true
+}
