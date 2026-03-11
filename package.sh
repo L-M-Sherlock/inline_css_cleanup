@@ -19,6 +19,11 @@ if [[ ! -f "$ADDON_DIR/__init__.py" ]]; then
   exit 1
 fi
 
+if [[ ! -f "$ADDON_DIR/config.json" ]]; then
+  echo "config.json not found in $ADDON_DIR" >&2
+  exit 1
+fi
+
 mkdir -p "$OUT_DIR"
 OUT_DIR_ABS=$(cd "$OUT_DIR" && pwd)
 
@@ -33,11 +38,11 @@ PY
 
 OUT_FILE="$OUT_DIR_ABS/${PKG_NAME}.ankiaddon"
 
-# Create .ankiaddon (zip) with manifest at root
+# Create .ankiaddon (zip) with only runtime-required files
 (
   cd "$ADDON_DIR"
   # -q for quiet, -r recurse, -X no extra file attributes
-  zip -q -r -X "$OUT_FILE" .
+  zip -q -X "$OUT_FILE" __init__.py manifest.json config.json
 )
 
 echo "Wrote $OUT_FILE"
