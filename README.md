@@ -59,7 +59,6 @@ Quick defaults (from `config.json`):
 - Re-running is safe and idempotent: it will not duplicate imports or rules.
 - Consider backing up your collection before the first run.
 - Extracted CSS is stored in `collection.media/_extracted_css.css` and also mirrored to `user_files/extracted_css.css` (easier to find).
-- Removing CSS from fields means those fields will lose styling in the **card browser**, because the CSS now lives in the media file and is only imported during card rendering. If you want styled fields in the browser, install the CSS Injector add-on (<https://ankiweb.net/shared/info/181103283>) and paste the contents of `user_files/extracted_css.css` into its `field.css`. You can find `user_files/extracted_css.css` by navigating to the add‑on folder (Tools → Add‑ons → Inline CSS Cleanup → click **View Files**).
 
 ## License
 
