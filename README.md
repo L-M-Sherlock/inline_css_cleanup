@@ -22,11 +22,12 @@ Option A — AnkiWeb code:
 2. Enter the code `465508076`
 3. Restart Anki
 
-Option B — Install from file:
+Option B — Build from source:
 
-1. Download `inline-css-cleanup.ankiaddon`
-2. In Anki: **Tools → Add-ons → Install from file…**
-3. Select the `.ankiaddon` file and restart Anki
+1. Download the source code
+2. Run `./package.sh` to build `inline-css-cleanup.ankiaddon`
+3. In Anki: **Tools → Add-ons → Install from file…**
+4. Select the `.ankiaddon` file and restart Anki
 
 ## Usage
 
