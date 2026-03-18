@@ -3,11 +3,10 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
-from collections import OrderedDict
 from typing import Iterable
-import re
 
 from anki.collection import OpChanges
 from aqt import mw
@@ -15,7 +14,20 @@ from aqt.operations import CollectionOp
 from aqt.qt import QAction
 from aqt.utils import askUser, showInfo
 
+EXTRACTED_CSS_FILENAME = "_extracted_css.css"
+IMPORT_STYLE_SNIPPET = f'<style>@import url("{EXTRACTED_CSS_FILENAME}");</style>'
+LEGACY_MARKER_START = "/* Inline CSS Cleanup: BEGIN */"
+LEGACY_MARKER_END = "/* Inline CSS Cleanup: END */"
+
 STYLE_BLOCK_RE = re.compile(r"<style[^>]*>(.*?)</style>", re.IGNORECASE | re.DOTALL)
+IMPORT_RE = re.compile(
+    rf"@import\s+(?:url\(\s*)?[\"']?{re.escape(EXTRACTED_CSS_FILENAME)}[\"']?\s*\)?\s*;?",
+    re.IGNORECASE,
+)
+LEGACY_BLOCK_RE = re.compile(
+    re.escape(LEGACY_MARKER_START) + r"(.*?)" + re.escape(LEGACY_MARKER_END),
+    re.DOTALL,
+)
 
 
 class SelectorDeduper:
@@ -150,6 +162,7 @@ class SelectorDeduper:
 class CleanupResult:
     changes: OpChanges
     summaries: list[tuple[str, dict]]
+    missing_note_types: list[str]
 
 
 def _merge_changes(changes: Iterable[OpChanges]) -> OpChanges:
@@ -180,10 +193,12 @@ def _get_config() -> dict:
     # defaults
     config.setdefault("note_types", ["Lapis"])
     config.setdefault("fields", ["Glossary", "MainDefinition"])
-    config.setdefault("css_marker_start", "/* Inline CSS Cleanup: BEGIN */")
-    config.setdefault("css_marker_end", "/* Inline CSS Cleanup: END */")
     config.setdefault("confirm_before_run", True)
     return config
+
+
+def _media_css_path(col) -> Path:
+    return Path(col.media.dir()) / EXTRACTED_CSS_FILENAME
 
 
 def _user_files_dir() -> Path:
@@ -194,43 +209,167 @@ def _user_css_path() -> Path:
     return _user_files_dir() / "extracted_css.css"
 
 
-def _merge_css(existing: str, new_css: str, marker_start: str, marker_end: str) -> str:
-    existing = existing or ""
-    start_re = re.escape(marker_start)
-    end_re = re.escape(marker_end)
-    block_re = re.compile(start_re + r"(.*?)" + end_re, re.DOTALL)
+def _legacy_css_from_model(model: dict) -> str:
+    css = model.get("css", "")
+    match = LEGACY_BLOCK_RE.search(css)
+    if not match:
+        return ""
+    return match.group(1).strip()
 
-    new_css = new_css.strip()
-    if not new_css:
-        # If there's no new CSS extracted, keep existing styling unchanged.
-        # This makes repeated runs idempotent.
-        return existing
 
-    # Merge with existing block (if present) by selector, keeping existing rules first.
+def _is_plain_text(text: str) -> bool:
+    return "<" not in text
+
+
+def _read_text(path: Path) -> str:
+    if path.exists():
+        return path.read_text(encoding="utf-8")
+    return ""
+
+
+def _merge_css_sources(*sources: str) -> str:
     deduper = SelectorDeduper()
-    match = block_re.search(existing)
-    if match:
-        existing_block = match.group(1).strip()
-        if existing_block:
-            deduper.add_css(existing_block)
-    deduper.add_css(new_css)
-
-    merged_css = deduper.render()
-    block = f"{marker_start}\n{merged_css}\n{marker_end}"
-    if match:
-        return block_re.sub(block, existing)
-    if existing and not existing.endswith("\n"):
-        existing += "\n"
-    return existing + block
+    for css in sources:
+        if css.strip():
+            deduper.add_css(css)
+    return deduper.render()
 
 
-def _cleanup_model(col, model, fields: list[str], marker_start: str, marker_end: str):
+def _should_add_import(text: str, import_needed: bool, has_import: bool) -> bool:
+    return (
+        import_needed and not has_import and text.strip() and not _is_plain_text(text)
+    )
+
+
+def _should_defer_import(text: str, import_needed: bool, has_import: bool) -> bool:
+    return (
+        not import_needed
+        and not has_import
+        and text.strip()
+        and not _is_plain_text(text)
+    )
+
+
+@dataclass
+class FieldProcessResult:
+    new_value: str | None
+    removed_bytes: int
+    css_blocks: list[str]
+    style_blocks: int
+    pending_import: bool
+    import_needed_now: bool
+
+
+def _process_field(old: str, import_needed: bool) -> FieldProcessResult:
+    has_import = bool(IMPORT_RE.search(old))
+
+    if "<style" not in old.lower():
+        if _should_add_import(old, import_needed, has_import):
+            return FieldProcessResult(
+                new_value=IMPORT_STYLE_SNIPPET + old,
+                removed_bytes=0,
+                css_blocks=[],
+                style_blocks=0,
+                pending_import=False,
+                import_needed_now=import_needed,
+            )
+        if _should_defer_import(old, import_needed, has_import):
+            return FieldProcessResult(
+                new_value=None,
+                removed_bytes=0,
+                css_blocks=[],
+                style_blocks=0,
+                pending_import=True,
+                import_needed_now=import_needed,
+            )
+        return FieldProcessResult(
+            new_value=None,
+            removed_bytes=0,
+            css_blocks=[],
+            style_blocks=0,
+            pending_import=False,
+            import_needed_now=import_needed,
+        )
+
+    blocks = STYLE_BLOCK_RE.findall(old)
+    if not blocks:
+        if _should_add_import(old, import_needed, has_import):
+            return FieldProcessResult(
+                new_value=IMPORT_STYLE_SNIPPET + old,
+                removed_bytes=0,
+                css_blocks=[],
+                style_blocks=0,
+                pending_import=False,
+                import_needed_now=import_needed,
+            )
+        if _should_defer_import(old, import_needed, has_import):
+            return FieldProcessResult(
+                new_value=None,
+                removed_bytes=0,
+                css_blocks=[],
+                style_blocks=0,
+                pending_import=True,
+                import_needed_now=import_needed,
+            )
+        return FieldProcessResult(
+            new_value=None,
+            removed_bytes=0,
+            css_blocks=[],
+            style_blocks=0,
+            pending_import=False,
+            import_needed_now=import_needed,
+        )
+
+    cleaned_blocks: list[str] = []
+    for css in blocks:
+        css = IMPORT_RE.sub("", css)
+        if css.strip():
+            cleaned_blocks.append(css)
+
+    if not cleaned_blocks and has_import:
+        return FieldProcessResult(
+            new_value=None,
+            removed_bytes=0,
+            css_blocks=[],
+            style_blocks=0,
+            pending_import=False,
+            import_needed_now=True,
+        )
+
+    new = STYLE_BLOCK_RE.sub("", old)
+    removed = len(old) - len(new)
+    if _should_add_import(new, True, has_import):
+        new = IMPORT_STYLE_SNIPPET + new
+    import_needed_now = True
+
+    return FieldProcessResult(
+        new_value=new if new != old else None,
+        removed_bytes=removed,
+        css_blocks=cleaned_blocks,
+        style_blocks=len(blocks),
+        pending_import=False,
+        import_needed_now=import_needed_now,
+    )
+
+
+def _cleanup_model(col, model, fields: list[str]):
     deduper = SelectorDeduper()
     updated_notes = 0
     removed_bytes = 0
     style_blocks = 0
-    notes_to_update = []
+    notes_to_update = {}
     cancelled = False
+
+    media_css_path = _media_css_path(col)
+    user_css_path = _user_css_path()
+    existing_media_css = _read_text(media_css_path)
+    existing_user_css = _read_text(user_css_path)
+    legacy_css = _legacy_css_from_model(model)
+
+    import_needed = bool(
+        existing_media_css.strip() or existing_user_css.strip() or legacy_css.strip()
+    )
+    pending_import: list[tuple[object, str]] = []
 
     nids = col.db.list("select id from notes where mid=?", model["id"])
     total = len(nids)
@@ -249,21 +388,19 @@ def _cleanup_model(col, model, fields: list[str], marker_start: str, marker_end:
             if fname not in note:
                 continue
             old = note[fname]
-            if "<style" not in old.lower():
-                continue
-            blocks = STYLE_BLOCK_RE.findall(old)
-            if not blocks:
-                continue
-            for css in blocks:
+            result = _process_field(old, import_needed)
+            for css in result.css_blocks:
                 deduper.add_css(css)
-            style_blocks += len(blocks)
-            new = STYLE_BLOCK_RE.sub("", old)
-            if new != old:
-                removed_bytes += len(old) - len(new)
-                note[fname] = new
+            style_blocks += result.style_blocks
+            removed_bytes += result.removed_bytes
+            if result.new_value is not None:
+                note[fname] = result.new_value
                 changed = True
+            if result.pending_import:
+                pending_import.append((note, fname))
+            import_needed = result.import_needed_now or import_needed
         if changed:
-            notes_to_update.append(note)
+            notes_to_update[note.id] = note
             updated_notes += 1
         processed += 1
         if processed % 200 == 0 or processed == total:
@@ -283,36 +420,34 @@ def _cleanup_model(col, model, fields: list[str], marker_start: str, marker_end:
     if total:
         mw.taskman.run_on_main(lambda: mw.progress.finish())
 
+    new_css = deduper.render()
+    merged_media_css = _merge_css_sources(
+        existing_media_css, existing_user_css, legacy_css, new_css
+    )
+
+    if merged_media_css.strip() and pending_import:
+        for note, fname in pending_import:
+            if fname not in note:
+                continue
+            old = note[fname]
+            if IMPORT_RE.search(old):
+                continue
+            if _should_add_import(old, True, False):
+                note[fname] = IMPORT_STYLE_SNIPPET + old
+                notes_to_update[note.id] = note
+
+    media_css_updated = merged_media_css != existing_media_css
+    if media_css_updated:
+        media_css_path.write_text(merged_media_css, encoding="utf-8")
+
+    user_css_updated = merged_media_css != existing_user_css
+    if user_css_updated:
+        user_css_path.parent.mkdir(parents=True, exist_ok=True)
+        user_css_path.write_text(merged_media_css, encoding="utf-8")
+
     changes_list: list[OpChanges] = []
     if notes_to_update:
-        changes_list.append(col.update_notes(notes_to_update))
-
-    new_css = deduper.render()
-
-    # Merge extracted CSS into user_files for persistence across upgrades.
-    user_css_path = _user_css_path()
-    existing_user_css = ""
-    if user_css_path.exists():
-        existing_user_css = user_css_path.read_text(encoding="utf-8")
-
-    merged_user_css = existing_user_css
-    if new_css.strip():
-        user_deduper = SelectorDeduper()
-        if existing_user_css.strip():
-            user_deduper.add_css(existing_user_css)
-        user_deduper.add_css(new_css)
-        merged_user_css = user_deduper.render()
-
-    if merged_user_css != existing_user_css:
-        user_css_path.parent.mkdir(parents=True, exist_ok=True)
-        user_css_path.write_text(merged_user_css, encoding="utf-8")
-
-    existing_css = model.get("css", "")
-    merged_css = _merge_css(existing_css, merged_user_css, marker_start, marker_end)
-    css_updated = merged_css != existing_css
-    if css_updated:
-        model["css"] = merged_css
-        changes_list.append(col.models.update_dict(model))
+        changes_list.append(col.update_notes(list(notes_to_update.values())))
 
     summary = {
         "updated_notes": updated_notes,
@@ -323,7 +458,8 @@ def _cleanup_model(col, model, fields: list[str], marker_start: str, marker_end:
         "unique_statements": deduper.unique_statements,
         "total_statements": deduper.total_statements,
         "css_bytes": deduper.total_css_bytes,
-        "css_updated": css_updated,
+        "media_css_updated": media_css_updated,
+        "user_css_updated": user_css_updated,
         "cancelled": cancelled,
         "processed": processed,
         "total": total,
@@ -336,18 +472,18 @@ def _run_cleanup(col) -> CleanupResult:
     config = _get_config()
     note_types: list[str] = config.get("note_types", [])
     fields: list[str] = config.get("fields", [])
-    marker_start: str = config.get("css_marker_start")
-    marker_end: str = config.get("css_marker_end")
 
     if not fields:
         raise Exception("No target fields configured.")
 
     models = []
+    missing_note_types: list[str] = []
     if note_types:
         for name in note_types:
             model = col.models.by_name(name)
             if not model:
-                raise Exception(f"Note type not found: {name}")
+                missing_note_types.append(name)
+                continue
             models.append(model)
     else:
         models = list(col.models.all())
@@ -355,11 +491,15 @@ def _run_cleanup(col) -> CleanupResult:
     summaries: list[tuple[str, dict]] = []
     all_changes: list[OpChanges] = []
     for model in models:
-        summary, changes = _cleanup_model(col, model, fields, marker_start, marker_end)
+        summary, changes = _cleanup_model(col, model, fields)
         summaries.append((model["name"], summary))
         all_changes.append(changes)
 
-    return CleanupResult(changes=_merge_changes(all_changes), summaries=summaries)
+    return CleanupResult(
+        changes=_merge_changes(all_changes),
+        summaries=summaries,
+        missing_note_types=missing_note_types,
+    )
 
 
 def _on_cleanup_done(result: CleanupResult) -> None:
@@ -371,6 +511,8 @@ def _on_cleanup_done(result: CleanupResult) -> None:
         return f"{n} B"
 
     lines: list[str] = []
+    if not result.summaries:
+        lines.append("No matching note types were processed.")
     for name, s in result.summaries:
         lines.append(f"Note type: {name}")
         if s.get("total"):
@@ -388,11 +530,16 @@ def _on_cleanup_done(result: CleanupResult) -> None:
                 f"  Unique at-rules: {s['unique_statements']} (from {s['total_statements']})"
             )
         lines.append(f"  CSS bytes processed: {fmt_bytes(s['css_bytes'])}")
-        lines.append(f"  CSS updated in template: {s['css_updated']}")
+        lines.append(f"  Media CSS updated: {s['media_css_updated']}")
+        lines.append(f"  User CSS updated: {s['user_css_updated']}")
         lines.append("")
 
+    if result.missing_note_types:
+        missing = ", ".join(result.missing_note_types)
+        lines.append(f"Missing note types (skipped): {missing}")
+
     lines.append("After cleanup, run Tools → Check Database to shrink the collection.")
-    showInfo("\n".join(lines).strip())
+    showInfo("\n".join(lines).strip(), parent=mw)
 
 
 def on_run_cleanup() -> None:
@@ -401,7 +548,8 @@ def on_run_cleanup() -> None:
         ok = askUser(
             "Inline CSS Cleanup will:\n"
             "• Remove <style>…</style> blocks from the configured fields\n"
-            "• Deduplicate CSS by selector and write it into the note type Styling\n\n"
+            "• Write merged CSS to collection.media/_extracted_css.css\n"
+            "• Insert <style>@import ...</style> into fields as needed\n\n"
             "Continue?"
         )
         if not ok:

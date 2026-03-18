@@ -33,16 +33,6 @@ Which fields to strip inline `<style>` blocks from. Field names must match exact
 - Example:
   - `"fields": ["Glossary", "MainDefinition"]`
 
-### `css_marker_start` / `css_marker_end`
-Type: `string`
-
-Markers used to store the extracted CSS inside the note type Styling. The add-on
-only edits the CSS inside this marker block.
-
-- Example:
-  - `"css_marker_start": "/* Inline CSS Cleanup: BEGIN */"`
-  - `"css_marker_end": "/* Inline CSS Cleanup: END */"`
-
 ### `confirm_before_run`
 Type: `boolean`
 
@@ -55,16 +45,9 @@ Whether to show a confirmation dialog before running.
 
 - **Selector-level deduplication**: if the same selector appears multiple times,
   only the **first** occurrence is kept.
-- **Merge with existing marker block**: when rerun, the add-on merges new CSS
-  with the existing marker block (old rules keep priority).
-- **Idempotent**: running again with no new inline CSS will not change Styling.
-
-## User Files
-
-Extracted CSS is stored at `user_files/extracted_css.css`. Files under
-`user_files/` are preserved during add-on upgrades, while other add-on files are
-replaced. A `user_files/README.txt` is included in the package to ensure the
-folder is created on install.
+- **Media storage**: extracted CSS is written to `collection.media/_extracted_css.css`.
+- **User copy**: a mirrored copy is stored at `user_files/extracted_css.css` for easy access.
+- **Idempotent**: running again will not duplicate imports or CSS rules.
 
 ## Example Config
 
@@ -72,8 +55,6 @@ folder is created on install.
 {
   "note_types": ["Lapis"],
   "fields": ["Glossary", "MainDefinition"],
-  "css_marker_start": "/* Inline CSS Cleanup: BEGIN */",
-  "css_marker_end": "/* Inline CSS Cleanup: END */",
   "confirm_before_run": true
 }
 ```

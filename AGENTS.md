@@ -23,7 +23,6 @@ There is no automated test suite. Manual testing is expected in Anki.
 - Python code uses 4‑space indentation.
 - Prefer clear, short function names; avoid abbreviations.
 - Keep user‑facing strings concise and explicit (dialogs, tooltips).
-- Preserve existing marker strings and config keys to avoid breaking users.
 
 ## Testing Guidelines
 
