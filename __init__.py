@@ -20,6 +20,10 @@ LEGACY_MARKER_START = "/* Inline CSS Cleanup: BEGIN */"
 LEGACY_MARKER_END = "/* Inline CSS Cleanup: END */"
 
 STYLE_BLOCK_RE = re.compile(r"<style[^>]*>(.*?)</style>", re.IGNORECASE | re.DOTALL)
+HTML_TAG_RE = re.compile(r"<[^>]+>")
+MEDIA_TAG_RE = re.compile(
+    r"<(img|audio|video|svg|iframe|canvas|object|embed)\b", re.IGNORECASE
+)
 IMPORT_RE = re.compile(
     rf"@import\s+(?:url\(\s*)?[\"']?{re.escape(EXTRACTED_CSS_FILENAME)}[\"']?\s*\)?\s*;?",
     re.IGNORECASE,
@@ -217,8 +221,14 @@ def _legacy_css_from_model(model: dict) -> str:
     return match.group(1).strip()
 
 
-def _is_plain_text(text: str) -> bool:
-    return "<" not in text
+def _has_renderable_html_content(text: str) -> bool:
+    if "<" not in text:
+        return False
+    if MEDIA_TAG_RE.search(text):
+        return True
+    stripped = HTML_TAG_RE.sub("", text)
+    stripped = stripped.replace("&nbsp;", " ").replace("\u00a0", " ").strip()
+    return bool(stripped)
 
 
 def _read_text(path: Path) -> str:
@@ -237,7 +247,10 @@ def _merge_css_sources(*sources: str) -> str:
 
 def _should_add_import(text: str, import_needed: bool, has_import: bool) -> bool:
     return (
-        import_needed and not has_import and text.strip() and not _is_plain_text(text)
+        import_needed
+        and not has_import
+        and text.strip()
+        and _has_renderable_html_content(text)
     )
 
 
@@ -246,7 +259,7 @@ def _should_defer_import(text: str, import_needed: bool, has_import: bool) -> bo
         not import_needed
         and not has_import
         and text.strip()
-        and not _is_plain_text(text)
+        and _has_renderable_html_content(text)
     )
 
 
