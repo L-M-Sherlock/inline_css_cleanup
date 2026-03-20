@@ -4,5 +4,5 @@
   "confirm_before_run": true,
   "extract_inline_styles": false,
   "inline_style_min_length": 80,
-  "inline_style_min_ratio": 0.2
+  "inline_style_min_ratio": 0.05
 }

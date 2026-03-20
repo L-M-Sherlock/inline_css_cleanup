@@ -66,7 +66,7 @@ the number of notes that contain inline styles in the processed fields of the no
 If you set a value above 1, it will be treated as a percentage (e.g., `2` = 2%).
 
 - Example:
-  - `"inline_style_min_ratio": 0.2`
+  - `"inline_style_min_ratio": 0.05`
 
 ## Behavior Notes
 
@@ -85,6 +85,6 @@ If you set a value above 1, it will be treated as a percentage (e.g., `2` = 2%).
   "confirm_before_run": true,
   "extract_inline_styles": false,
   "inline_style_min_length": 80,
-  "inline_style_min_ratio": 0.2
+  "inline_style_min_ratio": 0.05
 }
 ```
