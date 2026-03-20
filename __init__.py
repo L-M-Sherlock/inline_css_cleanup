@@ -206,7 +206,7 @@ def _get_config() -> dict:
     config.setdefault("confirm_before_run", True)
     config.setdefault("extract_inline_styles", False)
     config.setdefault("inline_style_min_length", 80)
-    config.setdefault("inline_style_min_ratio", 0.005)
+    config.setdefault("inline_style_min_ratio", 0.05)
     return config
 
 
@@ -596,8 +596,7 @@ def _cleanup_model(col, model, fields: list[str], config: dict):
                     inline_style_removed_bytes += removed
                     removed_bytes += removed
                     import_needed = True
-                    has_import = bool(IMPORT_RE.search(new_value))
-                    if _should_add_import(new_value, True, has_import):
+                    if not IMPORT_RE.search(new_value):
                         new_value = IMPORT_STYLE_SNIPPET + new_value
                     note[fname] = new_value
                     changed = True
