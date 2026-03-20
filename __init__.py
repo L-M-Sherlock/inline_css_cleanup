@@ -3,7 +3,10 @@
 
 from __future__ import annotations
 
+import hashlib
+import math
 import re
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -20,7 +23,10 @@ LEGACY_MARKER_START = "/* Inline CSS Cleanup: BEGIN */"
 LEGACY_MARKER_END = "/* Inline CSS Cleanup: END */"
 
 STYLE_BLOCK_RE = re.compile(r"<style[^>]*>(.*?)</style>", re.IGNORECASE | re.DOTALL)
+STYLE_ATTR_RE = re.compile(r'\sstyle="([^"]*)"', re.IGNORECASE)
+CLASS_ATTR_RE = re.compile(r'\bclass="([^"]*)"', re.IGNORECASE)
 HTML_TAG_RE = re.compile(r"<[^>]+>")
+TAG_RE = re.compile(r"<[^>]+>")
 MEDIA_TAG_RE = re.compile(
     r"<(img|audio|video|svg|iframe|canvas|object|embed)\b", re.IGNORECASE
 )
@@ -198,6 +204,9 @@ def _get_config() -> dict:
     config.setdefault("note_types", ["Lapis"])
     config.setdefault("fields", ["Glossary", "MainDefinition"])
     config.setdefault("confirm_before_run", True)
+    config.setdefault("extract_inline_styles", False)
+    config.setdefault("inline_style_min_length", 80)
+    config.setdefault("inline_style_min_ratio", 0.005)
     return config
 
 
@@ -229,6 +238,127 @@ def _has_renderable_html_content(text: str) -> bool:
     stripped = HTML_TAG_RE.sub("", text)
     stripped = stripped.replace("&nbsp;", " ").replace("\u00a0", " ").strip()
     return bool(stripped)
+
+
+def _normalize_inline_style(style: str) -> str:
+    style = style.strip()
+    if not style:
+        return ""
+    style = re.sub(r"\s*;\s*", ";", style)
+    style = re.sub(r"\s*:\s*", ":", style)
+    style = re.sub(r"\s+", " ", style)
+    return style
+
+
+def _inline_style_class(style: str) -> str:
+    digest = hashlib.sha1(style.encode("utf-8")).hexdigest()[:10]
+    return f"inline-style-{digest}"
+
+
+def _inline_style_rule(style: str, class_name: str) -> str:
+    body = style.strip()
+    if body and not body.endswith(";"):
+        body += ";"
+    return f".{class_name} {{ {body} }}"
+
+
+def _collect_inline_style_counts(
+    col, nids, fields: list[str]
+) -> tuple[Counter, int, int]:
+    counts: Counter[str] = Counter()
+    total = 0
+    notes_with_styles = 0
+    for nid in nids:
+        note = col.get_note(nid)
+        seen: set[str] = set()
+        for fname in fields:
+            if fname not in note:
+                continue
+            text = note[fname]
+            if 'style="' not in text.lower():
+                continue
+            for raw in STYLE_ATTR_RE.findall(text):
+                norm = _normalize_inline_style(raw)
+                if not norm:
+                    continue
+                total += 1
+                seen.add(norm)
+        if seen:
+            notes_with_styles += 1
+            for style in seen:
+                counts[style] += 1
+    return counts, total, notes_with_styles
+
+
+def _select_inline_styles(
+    counts: Counter, min_ratio: float, min_length: int, note_total: int
+) -> tuple[dict[str, str], int]:
+    if not counts:
+        return {}, 0
+    if min_ratio > 1:
+        min_ratio = min_ratio / 100
+    min_ratio = max(min_ratio, 0)
+    note_total = max(1, note_total)
+    min_count = max(1, math.ceil(note_total * min_ratio))
+    selected: dict[str, str] = {}
+    for style, count in counts.items():
+        if count < min_count:
+            continue
+        if len(style) < min_length:
+            continue
+        selected[style] = _inline_style_class(style)
+    return selected, min_count
+
+
+def _apply_inline_style_extraction(
+    html: str, style_map: dict[str, str]
+) -> tuple[str, int, int]:
+    if not style_map:
+        return html, 0, 0
+    if 'style="' not in html.lower():
+        return html, 0, 0
+
+    removed_bytes = 0
+    extracted = 0
+
+    def repl(match: re.Match) -> str:
+        nonlocal removed_bytes, extracted
+        tag = match.group(0)
+        if tag.startswith("</"):
+            return tag
+        style_match = STYLE_ATTR_RE.search(tag)
+        if not style_match:
+            return tag
+        raw_style = style_match.group(1)
+        norm = _normalize_inline_style(raw_style)
+        class_name = style_map.get(norm)
+        if not class_name:
+            return tag
+
+        new_tag = STYLE_ATTR_RE.sub("", tag, count=1)
+        class_match = CLASS_ATTR_RE.search(new_tag)
+        if class_match:
+            existing = class_match.group(1)
+            classes = existing.split()
+            if class_name not in classes:
+                new_classes = f"{existing} {class_name}"
+                new_tag = (
+                    new_tag[: class_match.start(1)]
+                    + new_classes
+                    + new_tag[class_match.end(1) :]
+                )
+        else:
+            if new_tag.endswith("/>"):
+                new_tag = new_tag[:-2] + f' class="{class_name}"/>'
+            elif new_tag.endswith(">"):
+                new_tag = new_tag[:-1] + f' class="{class_name}">'
+
+        removed_bytes += len(tag) - len(new_tag)
+        extracted += 1
+        return new_tag
+
+    new_html = TAG_RE.sub(repl, html)
+    return new_html, removed_bytes, extracted
 
 
 def _read_text(path: Path) -> str:
@@ -365,10 +495,12 @@ def _process_field(old: str, import_needed: bool) -> FieldProcessResult:
     )
 
 
-def _cleanup_model(col, model, fields: list[str]):
+def _cleanup_model(col, model, fields: list[str], config: dict):
     deduper = SelectorDeduper()
     updated_notes = 0
     removed_bytes = 0
+    inline_style_removed_bytes = 0
+    inline_style_extracted = 0
     style_blocks = 0
     notes_to_update = {}
     cancelled = False
@@ -386,6 +518,38 @@ def _cleanup_model(col, model, fields: list[str]):
 
     nids = col.db.list("select id from notes where mid=?", model["id"])
     total = len(nids)
+
+    inline_style_total = 0
+    inline_style_unique = 0
+    inline_style_note_total = 0
+    inline_style_min_count = 0
+    inline_style_selected = 0
+    inline_style_map: dict[str, str] = {}
+    if config.get("extract_inline_styles", False):
+        (
+            inline_style_counts,
+            inline_style_total,
+            inline_style_note_total,
+        ) = _collect_inline_style_counts(col, nids, fields)
+        inline_style_unique = len(inline_style_counts)
+        inline_style_min_ratio = float(config.get("inline_style_min_ratio", 0))
+        inline_style_min_length = int(config.get("inline_style_min_length", 0))
+        inline_style_map, inline_style_min_count = _select_inline_styles(
+            inline_style_counts,
+            inline_style_min_ratio,
+            inline_style_min_length,
+            inline_style_note_total,
+        )
+        inline_style_selected = len(inline_style_map)
+        if inline_style_map:
+            inline_css = "\n".join(
+                _inline_style_rule(style, class_name)
+                for style, class_name in inline_style_map.items()
+            )
+            if inline_css.strip():
+                deduper.add_css(inline_css)
+        import_needed = import_needed or bool(inline_style_map)
+
     if total:
         mw.taskman.run_on_main(
             lambda total=total, name=model["name"]: mw.progress.start(
@@ -412,6 +576,21 @@ def _cleanup_model(col, model, fields: list[str]):
             if result.pending_import:
                 pending_import.append((note, fname))
             import_needed = result.import_needed_now or import_needed
+            current = note[fname]
+            if inline_style_map:
+                new_value, removed, extracted = _apply_inline_style_extraction(
+                    current, inline_style_map
+                )
+                if extracted:
+                    inline_style_extracted += extracted
+                    inline_style_removed_bytes += removed
+                    removed_bytes += removed
+                    import_needed = True
+                    has_import = bool(IMPORT_RE.search(new_value))
+                    if _should_add_import(new_value, True, has_import):
+                        new_value = IMPORT_STYLE_SNIPPET + new_value
+                    note[fname] = new_value
+                    changed = True
         if changed:
             notes_to_update[note.id] = note
             updated_notes += 1
@@ -466,6 +645,13 @@ def _cleanup_model(col, model, fields: list[str]):
         "updated_notes": updated_notes,
         "removed_bytes": removed_bytes,
         "style_blocks": style_blocks,
+        "inline_style_total": inline_style_total,
+        "inline_style_unique": inline_style_unique,
+        "inline_style_note_total": inline_style_note_total,
+        "inline_style_min_count": inline_style_min_count,
+        "inline_style_selected": inline_style_selected,
+        "inline_style_extracted": inline_style_extracted,
+        "inline_style_removed_bytes": inline_style_removed_bytes,
         "unique_selectors": deduper.unique_rules,
         "total_rules": deduper.total_rules,
         "unique_statements": deduper.unique_statements,
@@ -504,7 +690,7 @@ def _run_cleanup(col) -> CleanupResult:
     summaries: list[tuple[str, dict]] = []
     all_changes: list[OpChanges] = []
     for model in models:
-        summary, changes = _cleanup_model(col, model, fields)
+        summary, changes = _cleanup_model(col, model, fields, config)
         summaries.append((model["name"], summary))
         all_changes.append(changes)
 
@@ -535,6 +721,23 @@ def _on_cleanup_done(result: CleanupResult) -> None:
         lines.append(f"  Notes updated: {s['updated_notes']}")
         lines.append(f"  Style blocks removed: {s['style_blocks']}")
         lines.append(f"  Bytes removed from fields: {fmt_bytes(s['removed_bytes'])}")
+        if s.get("inline_style_total"):
+            lines.append(
+                "  Inline styles found: "
+                f"{s['inline_style_total']} (unique {s['inline_style_unique']})"
+            )
+            lines.append(f"  Inline style notes: {s['inline_style_note_total']}")
+            lines.append(
+                "  Inline style rules extracted: "
+                f"{s['inline_style_selected']} (min count {s['inline_style_min_count']} notes)"
+            )
+            lines.append(
+                f"  Inline style occurrences extracted: {s['inline_style_extracted']}"
+            )
+            lines.append(
+                "  Inline style bytes removed: "
+                f"{fmt_bytes(s['inline_style_removed_bytes'])}"
+            )
         lines.append(
             f"  Unique selectors: {s['unique_selectors']} (from {s['total_rules']} rules)"
         )
