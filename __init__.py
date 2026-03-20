@@ -256,7 +256,17 @@ def _inline_style_class(style: str) -> str:
 
 
 def _inline_style_rule(style: str, class_name: str) -> str:
-    body = style.strip()
+    parts = [part.strip() for part in style.strip().split(";") if part.strip()]
+    important_parts: list[str] = []
+    for part in parts:
+        if ":" not in part:
+            important_parts.append(part)
+            continue
+        if re.search(r"!important\\b", part, re.IGNORECASE):
+            important_parts.append(part)
+        else:
+            important_parts.append(f"{part} !important")
+    body = ";".join(important_parts)
     if body and not body.endswith(";"):
         body += ";"
     return f".{class_name} {{ {body} }}"

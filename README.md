@@ -60,7 +60,7 @@ Quick defaults (from `config.json`):
 - The add-on does not modify template Styling (useful if your Styling is auto-generated).
 - Re-running is safe and idempotent: it will not duplicate imports or rules.
 - Consider backing up your collection before the first run.
-- Extracting inline styles may reduce CSS specificity compared to inline `style=`.
+- Extracted inline styles are emitted with `!important` to better preserve appearance.
 - Extracted CSS is stored in `collection.media/_extracted_css.css` and also mirrored to `user_files/extracted_css.css` (easier to find).
 
 ## License

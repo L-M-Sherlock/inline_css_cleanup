@@ -75,6 +75,7 @@ If you set a value above 1, it will be treated as a percentage (e.g., `2` = 2%).
 - **Media storage**: extracted CSS is written to `collection.media/_extracted_css.css`.
 - **User copy**: a mirrored copy is stored at `user_files/extracted_css.css` for easy access.
 - **Idempotent**: running again will not duplicate imports or CSS rules.
+- **Inline style extraction**: extracted inline styles are emitted with `!important`.
 
 ## Example Config
 
