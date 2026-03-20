@@ -262,7 +262,7 @@ def _inline_style_rule(style: str, class_name: str) -> str:
         if ":" not in part:
             important_parts.append(part)
             continue
-        if re.search(r"!important\\b", part, re.IGNORECASE):
+        if re.search(r"!important\b", part, re.IGNORECASE):
             important_parts.append(part)
         else:
             important_parts.append(f"{part} !important")
