@@ -23,8 +23,6 @@ LEGACY_MARKER_START = "/* Inline CSS Cleanup: BEGIN */"
 LEGACY_MARKER_END = "/* Inline CSS Cleanup: END */"
 
 STYLE_BLOCK_RE = re.compile(r"<style[^>]*>(.*?)</style>", re.IGNORECASE | re.DOTALL)
-STYLE_ATTR_RE = re.compile(r'\sstyle="([^"]*)"', re.IGNORECASE)
-CLASS_ATTR_RE = re.compile(r'\bclass="([^"]*)"', re.IGNORECASE)
 HTML_TAG_RE = re.compile(r"<[^>]+>")
 TAG_RE = re.compile(r"<[^>]+>")
 MEDIA_TAG_RE = re.compile(
@@ -256,7 +254,53 @@ def _inline_style_class(style: str) -> str:
 
 
 def _inline_style_rule(style: str, class_name: str) -> str:
-    parts = [part.strip() for part in style.strip().split(";") if part.strip()]
+    parts: list[str] = []
+    current: list[str] = []
+    depth = 0
+    in_string: str | None = None
+    i = 0
+    while i < len(style):
+        ch = style[i]
+        if in_string:
+            if ch == in_string:
+                backslashes = 0
+                j = i - 1
+                while j >= 0 and style[j] == "\\":
+                    backslashes += 1
+                    j -= 1
+                if backslashes % 2 == 0:
+                    in_string = None
+            current.append(ch)
+            i += 1
+            continue
+        if ch in ("'", '"'):
+            in_string = ch
+            current.append(ch)
+            i += 1
+            continue
+        if ch == "(":
+            depth += 1
+            current.append(ch)
+            i += 1
+            continue
+        if ch == ")" and depth > 0:
+            depth -= 1
+            current.append(ch)
+            i += 1
+            continue
+        if ch == ";" and depth == 0:
+            part = "".join(current).strip()
+            if part:
+                parts.append(part)
+            current = []
+            i += 1
+            continue
+        current.append(ch)
+        i += 1
+    tail = "".join(current).strip()
+    if tail:
+        parts.append(tail)
+
     important_parts: list[str] = []
     for part in parts:
         if ":" not in part:
@@ -272,6 +316,99 @@ def _inline_style_rule(style: str, class_name: str) -> str:
     return f".{class_name} {{ {body} }}"
 
 
+def _parse_opening_tag(
+    tag: str,
+) -> tuple[str, list[tuple[str, str | None, str | None]], bool] | None:
+    if not tag.startswith("<") or not tag.endswith(">"):
+        return None
+    if tag.startswith("</"):
+        return None
+    inner = tag[1:-1].strip()
+    if not inner:
+        return None
+    self_close = False
+    if inner.endswith("/"):
+        self_close = True
+        inner = inner[:-1].rstrip()
+    if not inner:
+        return None
+    i = 0
+    n = len(inner)
+    while i < n and not inner[i].isspace():
+        i += 1
+    tag_name = inner[:i]
+    attrs_str = inner[i:]
+    attrs: list[tuple[str, str | None, str | None]] = []
+    i = 0
+    n = len(attrs_str)
+    while i < n:
+        while i < n and attrs_str[i].isspace():
+            i += 1
+        if i >= n:
+            break
+        start = i
+        while i < n and not attrs_str[i].isspace() and attrs_str[i] not in ("=", ">"):
+            i += 1
+        name = attrs_str[start:i]
+        if not name:
+            break
+        while i < n and attrs_str[i].isspace():
+            i += 1
+        value: str | None = None
+        quote: str | None = None
+        if i < n and attrs_str[i] == "=":
+            i += 1
+            while i < n and attrs_str[i].isspace():
+                i += 1
+            if i < n and attrs_str[i] in ('"', "'"):
+                quote = attrs_str[i]
+                i += 1
+                val_start = i
+                while i < n and attrs_str[i] != quote:
+                    i += 1
+                value = attrs_str[val_start:i]
+                if i < n:
+                    i += 1
+            else:
+                val_start = i
+                while i < n and not attrs_str[i].isspace():
+                    i += 1
+                value = attrs_str[val_start:i]
+        attrs.append((name, value, quote))
+    return tag_name, attrs, self_close
+
+
+def _format_opening_tag(
+    tag_name: str, attrs: list[tuple[str, str | None, str | None]], self_close: bool
+) -> str:
+    parts = [f"<{tag_name}"]
+    for name, value, quote in attrs:
+        if value is None:
+            parts.append(f" {name}")
+            continue
+        if quote is None:
+            parts.append(f" {name}={value}")
+        else:
+            parts.append(f" {name}={quote}{value}{quote}")
+    if self_close:
+        parts.append(" />")
+    else:
+        parts.append(">")
+    return "".join(parts)
+
+
+def _iter_inline_style_attrs(html: str) -> Iterable[str]:
+    for match in TAG_RE.finditer(html):
+        tag = match.group(0)
+        parsed = _parse_opening_tag(tag)
+        if not parsed:
+            continue
+        _, attrs, _ = parsed
+        for name, value, _ in attrs:
+            if name.lower() == "style" and value is not None:
+                yield value
+
+
 def _collect_inline_style_counts(
     col, nids, fields: list[str]
 ) -> tuple[Counter, int, int]:
@@ -285,9 +422,9 @@ def _collect_inline_style_counts(
             if fname not in note:
                 continue
             text = note[fname]
-            if 'style="' not in text.lower():
+            if "style=" not in text.lower():
                 continue
-            for raw in STYLE_ATTR_RE.findall(text):
+            for raw in _iter_inline_style_attrs(text):
                 norm = _normalize_inline_style(raw)
                 if not norm:
                     continue
@@ -325,7 +462,7 @@ def _apply_inline_style_extraction(
 ) -> tuple[str, int, int]:
     if not style_map:
         return html, 0, 0
-    if 'style="' not in html.lower():
+    if "style=" not in html.lower():
         return html, 0, 0
 
     removed_bytes = 0
@@ -334,35 +471,37 @@ def _apply_inline_style_extraction(
     def repl(match: re.Match) -> str:
         nonlocal removed_bytes, extracted
         tag = match.group(0)
-        if tag.startswith("</"):
+        parsed = _parse_opening_tag(tag)
+        if not parsed:
             return tag
-        style_match = STYLE_ATTR_RE.search(tag)
-        if not style_match:
+        tag_name, attrs, self_close = parsed
+        raw_style = None
+        for name, value, _ in attrs:
+            if name.lower() == "style" and value is not None:
+                raw_style = value
+                break
+        if raw_style is None:
             return tag
-        raw_style = style_match.group(1)
         norm = _normalize_inline_style(raw_style)
         class_name = style_map.get(norm)
         if not class_name:
             return tag
 
-        new_tag = STYLE_ATTR_RE.sub("", tag, count=1)
-        class_match = CLASS_ATTR_RE.search(new_tag)
-        if class_match:
-            existing = class_match.group(1)
-            classes = existing.split()
-            if class_name not in classes:
-                new_classes = f"{existing} {class_name}"
-                new_tag = (
-                    new_tag[: class_match.start(1)]
-                    + new_classes
-                    + new_tag[class_match.end(1) :]
-                )
-        else:
-            if new_tag.endswith("/>"):
-                new_tag = new_tag[:-2] + f' class="{class_name}"/>'
-            elif new_tag.endswith(">"):
-                new_tag = new_tag[:-1] + f' class="{class_name}">'
+        new_attrs: list[tuple[str, str | None, str | None]] = []
+        class_updated = False
+        for name, value, quote in attrs:
+            if name.lower() == "style":
+                continue
+            if name.lower() == "class" and value is not None:
+                classes = value.split()
+                if class_name not in classes:
+                    value = f"{value} {class_name}" if value else class_name
+                class_updated = True
+            new_attrs.append((name, value, quote))
+        if not class_updated:
+            new_attrs.append(("class", class_name, '"'))
 
+        new_tag = _format_opening_tag(tag_name, new_attrs, self_close)
         removed_bytes += len(tag) - len(new_tag)
         extracted += 1
         return new_tag
