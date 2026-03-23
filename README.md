@@ -51,7 +51,10 @@ Quick defaults (from `config.json`):
 {
   "note_types": ["Lapis"],
   "fields": ["Glossary", "MainDefinition"],
-  "confirm_before_run": true
+  "confirm_before_run": true,
+  "extract_inline_styles": false,
+  "inline_style_min_length": 80,
+  "inline_style_min_ratio": 0.05
 }
 ```
 
@@ -61,6 +64,7 @@ Quick defaults (from `config.json`):
 - Re-running is safe and idempotent: it will not duplicate imports or rules.
 - Consider backing up your collection before the first run.
 - Extracted inline styles are emitted with `!important` to better preserve appearance.
+- Inline style extraction thresholds are based on the number of notes containing inline styles.
 - Extracted CSS is stored in `collection.media/_extracted_css.css` and also mirrored to `user_files/extracted_css.css` (easier to find).
 
 ## License
