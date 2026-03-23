@@ -1,7 +1,7 @@
 # Inline CSS Cleanup — Configuration
 
 This add-on removes inline `<style>...</style>` blocks from selected note fields and
-moves the CSS into the note type Styling, with selector-level deduplication.
+stores the CSS in `collection.media/_extracted_css.css`, with selector-level deduplication.
 
 ## Config Location
 
@@ -41,6 +41,33 @@ Whether to show a confirmation dialog before running.
 - Example:
   - `"confirm_before_run": true`
 
+### `extract_inline_styles`
+Type: `boolean`
+
+Whether to extract repeated `style="..."` attributes into CSS classes.
+
+- Example:
+  - `"extract_inline_styles": false`
+
+### `inline_style_min_length`
+Type: `integer`
+
+Only extract inline styles with a string length at or above this value.
+
+- Example:
+  - `"inline_style_min_length": 80`
+
+### `inline_style_min_ratio`
+Type: `number`
+
+Minimum frequency **ratio** (0–1) to extract an inline style. The ratio is based on
+the number of notes that contain inline styles in the processed fields of the note type.
+
+If you set a value above 1, it will be treated as a percentage (e.g., `2` = 2%).
+
+- Example:
+  - `"inline_style_min_ratio": 0.05`
+
 ## Behavior Notes
 
 - **Selector-level deduplication**: if the same selector appears multiple times,
@@ -48,6 +75,7 @@ Whether to show a confirmation dialog before running.
 - **Media storage**: extracted CSS is written to `collection.media/_extracted_css.css`.
 - **User copy**: a mirrored copy is stored at `user_files/extracted_css.css` for easy access.
 - **Idempotent**: running again will not duplicate imports or CSS rules.
+- **Inline style extraction**: extracted inline styles are emitted with `!important`.
 
 ## Example Config
 
@@ -55,6 +83,9 @@ Whether to show a confirmation dialog before running.
 {
   "note_types": ["Lapis"],
   "fields": ["Glossary", "MainDefinition"],
-  "confirm_before_run": true
+  "confirm_before_run": true,
+  "extract_inline_styles": false,
+  "inline_style_min_length": 80,
+  "inline_style_min_ratio": 0.05
 }
 ```

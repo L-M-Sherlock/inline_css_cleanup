@@ -27,16 +27,7 @@ fi
 mkdir -p "$OUT_DIR"
 OUT_DIR_ABS=$(cd "$OUT_DIR" && pwd)
 
-# Use package name from manifest.json if possible
-PKG_NAME=$(python3 - "$ADDON_DIR/manifest.json" <<'PY'
-import json, sys
-with open(sys.argv[1], 'r', encoding='utf-8') as f:
-    data = json.load(f)
-print(data.get('package') or 'anki-addon')
-PY
-)
-
-OUT_FILE="$OUT_DIR_ABS/${PKG_NAME}.ankiaddon"
+OUT_FILE="$OUT_DIR_ABS/inline-css-cleanup.ankiaddon"
 
 # Create .ankiaddon (zip) with only runtime-required files
 (

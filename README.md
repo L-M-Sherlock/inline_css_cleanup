@@ -13,6 +13,7 @@ size limits.
 - Extracts CSS and **deduplicates by selector** (first occurrence wins)
 - Writes the CSS to `collection.media/_extracted_css.css`
 - Inserts a small `<style>@import ...</style>` into the field to load the CSS
+- Optionally extracts repeated `style="..."` attributes into CSS classes
 
 ## Install
 
@@ -59,6 +60,7 @@ Quick defaults (from `config.json`):
 - The add-on does not modify template Styling (useful if your Styling is auto-generated).
 - Re-running is safe and idempotent: it will not duplicate imports or rules.
 - Consider backing up your collection before the first run.
+- Extracted inline styles are emitted with `!important` to better preserve appearance.
 - Extracted CSS is stored in `collection.media/_extracted_css.css` and also mirrored to `user_files/extracted_css.css` (easier to find).
 
 ## License

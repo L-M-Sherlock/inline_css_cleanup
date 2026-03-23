@@ -1,5 +1,8 @@
 {
   "note_types": ["Lapis"],
   "fields": ["Glossary", "MainDefinition"],
-  "confirm_before_run": true
+  "confirm_before_run": true,
+  "extract_inline_styles": false,
+  "inline_style_min_length": 80,
+  "inline_style_min_ratio": 0.05
 }
