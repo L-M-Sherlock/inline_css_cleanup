@@ -516,6 +516,11 @@ def _read_text(path: Path) -> str:
     return ""
 
 
+def _sync_edited_media_files() -> None:
+    media_path = Path(mw.pm.profileFolder(), "collection.media")
+    media_path.touch()
+
+
 def _merge_css_sources(*sources: str) -> str:
     deduper = SelectorDeduper()
     for css in sources:
@@ -779,6 +784,7 @@ def _cleanup_model(col, model, fields: list[str], config: dict):
     media_css_updated = merged_media_css != existing_media_css
     if media_css_updated:
         media_css_path.write_text(merged_media_css, encoding="utf-8")
+        _sync_edited_media_files()
 
     user_css_updated = merged_media_css != existing_user_css
     if user_css_updated:
