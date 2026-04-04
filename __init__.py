@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import html as html_module
 import hashlib
 import math
 import re
@@ -239,6 +240,7 @@ def _has_renderable_html_content(text: str) -> bool:
 
 
 def _normalize_inline_style(style: str) -> str:
+    style = html_module.unescape(style)
     style = style.strip()
     if not style:
         return ""
