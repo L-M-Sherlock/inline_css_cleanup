@@ -44,9 +44,10 @@ To publish a release:
 ## Usage
 
 1. **Tools → Inline CSS Cleanup**
-2. Confirm the prompt
-3. Review the summary dialog
-4. Run **Check Database** to shrink the collection file after cleanup
+2. Select the decks, note types, and fields to process
+3. Click **Run Cleanup**
+4. Review the summary in the window
+5. Run **Check Database** to shrink the collection file after cleanup
 
 ## Example Screenshot
 
@@ -60,8 +61,12 @@ Quick defaults (from `config.json`):
 
 ```json
 {
+  "decks": [],
   "note_types": ["Lapis"],
   "fields": ["Glossary", "MainDefinition"],
+  "fields_by_note_type": {
+    "Lapis": ["Glossary", "MainDefinition"]
+  },
   "confirm_before_run": true,
   "extract_inline_styles": false,
   "inline_style_min_length": 80,

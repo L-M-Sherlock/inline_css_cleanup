@@ -15,6 +15,16 @@ Or edit the file directly:
 
 ## Config Options
 
+### `decks`
+Type: `array of strings`
+
+Which decks to process. Selecting a deck also includes its subdecks.
+
+- Example:
+  - `"decks": ["Japanese", "Mining::Lapis"]`
+
+If empty, **all** decks will be processed.
+
 ### `note_types`
 Type: `array of strings`
 
@@ -32,6 +42,17 @@ Which fields to strip inline `<style>` blocks from. Field names must match exact
 
 - Example:
   - `"fields": ["Glossary", "MainDefinition"]`
+
+This is also kept as a compatibility fallback when `fields_by_note_type` is not set
+for a selected note type.
+
+### `fields_by_note_type`
+Type: `object`
+
+Which fields to process for each note type. This is what the add-on window saves.
+
+- Example:
+  - `"fields_by_note_type": {"Lapis": ["Glossary", "MainDefinition"]}`
 
 ### `confirm_before_run`
 Type: `boolean`
@@ -81,8 +102,12 @@ If you set a value above 1, it will be treated as a percentage (e.g., `2` = 2%).
 
 ```json
 {
+  "decks": [],
   "note_types": ["Lapis"],
   "fields": ["Glossary", "MainDefinition"],
+  "fields_by_note_type": {
+    "Lapis": ["Glossary", "MainDefinition"]
+  },
   "confirm_before_run": true,
   "extract_inline_styles": false,
   "inline_style_min_length": 80,

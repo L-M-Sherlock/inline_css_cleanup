@@ -15,8 +15,23 @@ from typing import Iterable
 from anki.collection import OpChanges
 from aqt import mw
 from aqt.operations import CollectionOp
-from aqt.qt import QAction
-from aqt.utils import askUser, showInfo
+from aqt.qt import (
+    QAction,
+    QCheckBox,
+    QComboBox,
+    QDialog,
+    QDoubleSpinBox,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QScrollArea,
+    QSpinBox,
+    QTextBrowser,
+    QVBoxLayout,
+    QWidget,
+)
+from aqt.utils import askUser, showInfo, showWarning
 
 EXTRACTED_CSS_FILENAME = "_extracted_css.css"
 IMPORT_STYLE_SNIPPET = f'<style>@import url("{EXTRACTED_CSS_FILENAME}");</style>'
@@ -172,6 +187,7 @@ class CleanupResult:
     changes: OpChanges
     summaries: list[tuple[str, dict]]
     missing_note_types: list[str]
+    missing_decks: list[str]
 
 
 def _merge_changes(changes: Iterable[OpChanges]) -> OpChanges:
@@ -200,13 +216,149 @@ def _merge_changes(changes: Iterable[OpChanges]) -> OpChanges:
 def _get_config() -> dict:
     config = mw.addonManager.getConfig(__name__) or {}
     # defaults
+    config.setdefault("decks", [])
     config.setdefault("note_types", ["Lapis"])
     config.setdefault("fields", ["Glossary", "MainDefinition"])
+    config.setdefault("fields_by_note_type", {})
     config.setdefault("confirm_before_run", True)
     config.setdefault("extract_inline_styles", False)
     config.setdefault("inline_style_min_length", 80)
     config.setdefault("inline_style_min_ratio", 0.05)
     return config
+
+
+def _string_list(value) -> list[str]:
+    if isinstance(value, str):
+        raw_items = value.split(",")
+    elif isinstance(value, (list, tuple, set)):
+        raw_items = value
+    else:
+        raw_items = []
+    return [str(item).strip() for item in raw_items if str(item).strip()]
+
+
+def _field_names_from_model(model: dict) -> list[str]:
+    return [
+        str(field.get("name", "")).strip()
+        for field in model.get("flds", [])
+        if str(field.get("name", "")).strip()
+    ]
+
+
+def _all_note_type_models(col) -> list[tuple[str, dict]]:
+    try:
+        models = col.models.all()
+    except Exception:
+        return []
+
+    pairs = []
+    for model in models:
+        name = str(model.get("name", "")).strip()
+        if name:
+            pairs.append((name, model))
+    return sorted(pairs, key=lambda item: item[0].lower())
+
+
+def _deck_pair_from_item(item) -> tuple[str, int] | None:
+    if isinstance(item, dict):
+        name = item.get("name")
+        deck_id = item.get("id")
+    else:
+        name = getattr(item, "name", None)
+        deck_id = getattr(item, "id", None)
+    if name is None or deck_id is None:
+        return None
+    name = str(name).strip()
+    if not name:
+        return None
+    return name, int(deck_id)
+
+
+def _all_deck_names_and_ids(col) -> list[tuple[str, int]]:
+    decks = []
+    try:
+        decks = list(col.decks.all_names_and_ids())
+    except Exception:
+        try:
+            decks = list(col.decks.all())
+        except Exception:
+            decks = list(getattr(col.decks, "decks", {}).values())
+
+    pairs = []
+    seen_ids = set()
+    for item in decks:
+        pair = _deck_pair_from_item(item)
+        if not pair:
+            continue
+        name, deck_id = pair
+        if deck_id in seen_ids:
+            continue
+        seen_ids.add(deck_id)
+        pairs.append((name, deck_id))
+    return sorted(pairs, key=lambda item: item[0].lower())
+
+
+def _configured_fields_by_note_type(config: dict) -> dict[str, list[str]]:
+    configured = config.get("fields_by_note_type", {})
+    if not isinstance(configured, dict):
+        return {}
+    return {
+        str(note_type).strip(): _string_list(fields)
+        for note_type, fields in configured.items()
+        if str(note_type).strip()
+    }
+
+
+def _fields_for_model(config: dict, model_name: str) -> list[str]:
+    fields_by_note_type = _configured_fields_by_note_type(config)
+    fields = fields_by_note_type.get(model_name)
+    if fields:
+        return fields
+    return _string_list(config.get("fields", []))
+
+
+def _matching_deck_ids(
+    col, configured_decks: list[str]
+) -> tuple[set[int] | None, list[str]]:
+    if not configured_decks:
+        return None, []
+
+    all_decks = _all_deck_names_and_ids(col)
+    deck_ids: set[int] = set()
+    missing_decks: list[str] = []
+    for configured_name in configured_decks:
+        matched = {
+            deck_id
+            for name, deck_id in all_decks
+            if name == configured_name or name.startswith(f"{configured_name}::")
+        }
+        if matched:
+            deck_ids.update(matched)
+        else:
+            missing_decks.append(configured_name)
+    return deck_ids, missing_decks
+
+
+def _note_ids_for_model(col, model_id: int, deck_ids: set[int] | None) -> list[int]:
+    if deck_ids is None:
+        return col.db.list("select id from notes where mid=?", model_id)
+    if not deck_ids:
+        return []
+
+    ordered_deck_ids = sorted(deck_ids)
+    placeholders = ",".join("?" for _ in ordered_deck_ids)
+    return col.db.list(
+        f"""
+        select distinct n.id
+        from notes n
+        join cards c on c.nid = n.id
+        where n.mid = ?
+          and (c.did in ({placeholders}) or c.odid in ({placeholders}))
+        """,
+        model_id,
+        *ordered_deck_ids,
+        *ordered_deck_ids,
+    )
 
 
 def _media_css_path(col) -> Path:
@@ -651,7 +803,9 @@ def _process_field(old: str, import_needed: bool) -> FieldProcessResult:
     )
 
 
-def _cleanup_model(col, model, fields: list[str], config: dict):
+def _cleanup_model(
+    col, model, fields: list[str], config: dict, deck_ids: set[int] | None
+):
     deduper = SelectorDeduper()
     updated_notes = 0
     removed_bytes = 0
@@ -672,7 +826,7 @@ def _cleanup_model(col, model, fields: list[str], config: dict):
     )
     pending_import: list[tuple[object, str]] = []
 
-    nids = col.db.list("select id from notes where mid=?", model["id"])
+    nids = _note_ids_for_model(col, model["id"], deck_ids)
     total = len(nids)
 
     inline_style_total = 0
@@ -823,13 +977,17 @@ def _cleanup_model(col, model, fields: list[str], config: dict):
     return summary, _merge_changes(changes_list)
 
 
-def _run_cleanup(col) -> CleanupResult:
-    config = _get_config()
-    note_types: list[str] = config.get("note_types", [])
-    fields: list[str] = config.get("fields", [])
+def _run_cleanup(col, config: dict | None = None) -> CleanupResult:
+    config = config or _get_config()
+    note_types = _string_list(config.get("note_types", []))
+    configured_decks = _string_list(config.get("decks", []))
+    configured_fields = _string_list(config.get("fields", []))
+    fields_by_note_type = _configured_fields_by_note_type(config)
 
-    if not fields:
+    if not configured_fields and not any(fields_by_note_type.values()):
         raise Exception("No target fields configured.")
+
+    deck_ids, missing_decks = _matching_deck_ids(col, configured_decks)
 
     models = []
     missing_note_types: list[str] = []
@@ -846,7 +1004,10 @@ def _run_cleanup(col) -> CleanupResult:
     summaries: list[tuple[str, dict]] = []
     all_changes: list[OpChanges] = []
     for model in models:
-        summary, changes = _cleanup_model(col, model, fields, config)
+        fields = _fields_for_model(config, model["name"])
+        if not fields:
+            continue
+        summary, changes = _cleanup_model(col, model, fields, config, deck_ids)
         summaries.append((model["name"], summary))
         all_changes.append(changes)
 
@@ -854,10 +1015,11 @@ def _run_cleanup(col) -> CleanupResult:
         changes=_merge_changes(all_changes),
         summaries=summaries,
         missing_note_types=missing_note_types,
+        missing_decks=missing_decks,
     )
 
 
-def _on_cleanup_done(result: CleanupResult) -> None:
+def _format_cleanup_summary(result: CleanupResult) -> str:
     def fmt_bytes(n: int) -> str:
         if n >= 1024 * 1024:
             return f"{n / (1024 * 1024):.2f} MB"
@@ -910,26 +1072,429 @@ def _on_cleanup_done(result: CleanupResult) -> None:
         missing = ", ".join(result.missing_note_types)
         lines.append(f"Missing note types (skipped): {missing}")
 
+    if result.missing_decks:
+        missing = ", ".join(result.missing_decks)
+        lines.append(f"Missing decks (skipped): {missing}")
+
     lines.append("After cleanup, run Tools → Check Database to shrink the collection.")
-    showInfo("\n".join(lines).strip(), parent=mw)
+    return "\n".join(lines).strip()
+
+
+def _on_cleanup_done(result: CleanupResult) -> None:
+    showInfo(_format_cleanup_summary(result), parent=mw)
+
+
+class CleanupDialog(QDialog):
+    def __init__(self) -> None:
+        super().__init__(mw)
+        self.setWindowTitle("Inline CSS Cleanup")
+        self.resize(920, 680)
+        self.config = _get_config()
+        self.deck_checkboxes: dict[str, QCheckBox] = {}
+        self.note_type_names: list[str] = []
+        self.selected_note_type_names: list[str] = []
+        self.field_checkboxes: dict[str, dict[str, QCheckBox]] = {}
+        self.no_fields_label: QLabel | None = None
+        self._setup_ui()
+
+    def _setup_ui(self) -> None:
+        layout = QVBoxLayout()
+
+        layout.addWidget(QLabel("Decks"))
+        self.all_decks_checkbox = QCheckBox("All decks")
+        self.all_decks_checkbox.setChecked(not _string_list(self.config.get("decks")))
+        self.all_decks_checkbox.toggled.connect(self._update_deck_controls)
+        layout.addWidget(self.all_decks_checkbox)
+
+        deck_scroll = QScrollArea()
+        deck_scroll.setWidgetResizable(True)
+        deck_scroll.setMinimumHeight(88)
+        deck_scroll.setMaximumHeight(150)
+        deck_container = QWidget()
+        deck_layout = QVBoxLayout()
+        deck_layout.setContentsMargins(6, 4, 6, 4)
+
+        configured_decks = set(_string_list(self.config.get("decks")))
+        for name, _deck_id in _all_deck_names_and_ids(mw.col):
+            checkbox = QCheckBox(name)
+            checkbox.setChecked(name in configured_decks)
+            deck_layout.addWidget(checkbox)
+            self.deck_checkboxes[name] = checkbox
+        if not self.deck_checkboxes:
+            deck_layout.addWidget(QLabel("No decks found."))
+        deck_layout.addStretch()
+        deck_container.setLayout(deck_layout)
+        deck_scroll.setWidget(deck_container)
+        layout.addWidget(deck_scroll)
+
+        layout.addWidget(QLabel("Note Types and Fields"))
+        note_type_section = QHBoxLayout()
+        note_type_panel = QWidget()
+        note_type_panel.setMaximumWidth(300)
+        note_type_panel_layout = QVBoxLayout()
+        note_type_panel_layout.setContentsMargins(0, 0, 0, 0)
+        note_type_panel_layout.addWidget(QLabel("Target note types"))
+
+        note_type_scroll = QScrollArea()
+        note_type_scroll.setWidgetResizable(True)
+        note_type_scroll.setMinimumHeight(190)
+        note_type_container = QWidget()
+        self.note_type_list_layout = QVBoxLayout()
+        self.note_type_list_layout.setContentsMargins(6, 4, 6, 4)
+        note_type_container.setLayout(self.note_type_list_layout)
+        note_type_scroll.setWidget(note_type_container)
+        note_type_panel_layout.addWidget(note_type_scroll)
+
+        add_note_type_row = QHBoxLayout()
+        self.add_note_type_combo = QComboBox()
+        self.add_note_type_button = QPushButton("Add")
+        self.add_note_type_button.clicked.connect(self._add_selected_note_type)
+        add_note_type_row.addWidget(self.add_note_type_combo, 1)
+        add_note_type_row.addWidget(self.add_note_type_button)
+        note_type_panel_layout.addLayout(add_note_type_row)
+
+        field_panel = QWidget()
+        field_panel_layout = QVBoxLayout()
+        field_panel_layout.setContentsMargins(0, 0, 0, 0)
+        field_selector_row = QHBoxLayout()
+        field_selector_row.addWidget(QLabel("Fields for"))
+        self.note_type_combo = QComboBox()
+        field_selector_row.addWidget(self.note_type_combo)
+        field_selector_row.addStretch()
+        field_panel_layout.addLayout(field_selector_row)
+
+        self.fields_scroll = QScrollArea()
+        self.fields_scroll.setWidgetResizable(True)
+        self.fields_widget = QWidget()
+        self.fields_layout = QGridLayout()
+        self.fields_layout.setContentsMargins(6, 4, 6, 4)
+        self.fields_widget.setLayout(self.fields_layout)
+        self.fields_scroll.setWidget(self.fields_widget)
+        field_panel_layout.addWidget(self.fields_scroll)
+        field_panel.setLayout(field_panel_layout)
+
+        configured_note_types = set(_string_list(self.config.get("note_types")))
+        select_all_note_types = not configured_note_types
+        fields_by_note_type = _configured_fields_by_note_type(self.config)
+        global_fields = set(_string_list(self.config.get("fields", [])))
+        model_pairs = _all_note_type_models(mw.col)
+        if not model_pairs:
+            model_pairs = [
+                (name, {"flds": []}) for name in sorted(configured_note_types)
+            ]
+
+        for name, model in model_pairs:
+            self.note_type_names.append(name)
+            if select_all_note_types or name in configured_note_types:
+                self.selected_note_type_names.append(name)
+
+            selected_fields = set(fields_by_note_type.get(name) or global_fields)
+            field_checkboxes: dict[str, QCheckBox] = {}
+            for field_name in _field_names_from_model(model):
+                field_checkbox = QCheckBox(field_name)
+                field_checkbox.setChecked(field_name in selected_fields)
+                field_checkboxes[field_name] = field_checkbox
+
+            self.field_checkboxes[name] = field_checkboxes
+
+        if not self.note_type_names:
+            self.selected_note_type_names = []
+
+        note_type_panel.setLayout(note_type_panel_layout)
+        note_type_section.addWidget(note_type_panel)
+        note_type_section.addWidget(field_panel, 1)
+        layout.addLayout(note_type_section)
+
+        self.note_type_combo.currentIndexChanged.connect(self._render_field_controls)
+        self._refresh_note_type_views()
+
+        option_row = QHBoxLayout()
+        self.extract_inline_styles_checkbox = QCheckBox(
+            "Extract repeated inline styles"
+        )
+        self.extract_inline_styles_checkbox.setChecked(
+            bool(self.config.get("extract_inline_styles", False))
+        )
+        option_row.addWidget(self.extract_inline_styles_checkbox)
+
+        option_row.addWidget(QLabel("Min length"))
+        self.inline_style_min_length_spin = QSpinBox()
+        self.inline_style_min_length_spin.setRange(0, 100000)
+        self.inline_style_min_length_spin.setValue(
+            int(self.config.get("inline_style_min_length", 80))
+        )
+        option_row.addWidget(self.inline_style_min_length_spin)
+
+        option_row.addWidget(QLabel("Min ratio"))
+        self.inline_style_min_ratio_spin = QDoubleSpinBox()
+        self.inline_style_min_ratio_spin.setRange(0, 100)
+        self.inline_style_min_ratio_spin.setDecimals(4)
+        self.inline_style_min_ratio_spin.setSingleStep(0.01)
+        self.inline_style_min_ratio_spin.setValue(
+            float(self.config.get("inline_style_min_ratio", 0.05))
+        )
+        option_row.addWidget(self.inline_style_min_ratio_spin)
+
+        self.confirm_before_run_checkbox = QCheckBox("Confirm before running")
+        self.confirm_before_run_checkbox.setChecked(
+            bool(self.config.get("confirm_before_run", True))
+        )
+        option_row.addWidget(self.confirm_before_run_checkbox)
+        option_row.addStretch()
+        layout.addLayout(option_row)
+
+        button_row = QHBoxLayout()
+        self.run_button = QPushButton("Run Cleanup")
+        self.run_button.clicked.connect(self.run_cleanup)
+        button_row.addWidget(self.run_button)
+
+        self.save_button = QPushButton("Save Defaults")
+        self.save_button.clicked.connect(self.save_defaults)
+        button_row.addWidget(self.save_button)
+        button_row.addStretch()
+        layout.addLayout(button_row)
+
+        self.output = QTextBrowser()
+        self.output.setPlainText("")
+        layout.addWidget(self.output)
+
+        self.setLayout(layout)
+        self._update_deck_controls()
+
+    def _update_deck_controls(self) -> None:
+        enabled = not self.all_decks_checkbox.isChecked()
+        for checkbox in self.deck_checkboxes.values():
+            checkbox.setEnabled(enabled)
+
+    def _clear_fields_layout(self) -> None:
+        while self.fields_layout.count():
+            item = self.fields_layout.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.setParent(None)
+
+    def _clear_note_type_list_layout(self) -> None:
+        while self.note_type_list_layout.count():
+            item = self.note_type_list_layout.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.setParent(None)
+
+    def _refresh_note_type_list(self) -> None:
+        self._clear_note_type_list_layout()
+        if not self.selected_note_type_names:
+            self.note_type_list_layout.addWidget(QLabel("No target note types."))
+        for note_type in self.selected_note_type_names:
+            row_widget = QWidget()
+            row_layout = QHBoxLayout()
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.addWidget(QLabel(note_type), 1)
+            remove_button = QPushButton("Remove")
+            remove_button.clicked.connect(
+                lambda checked=False, name=note_type: self._remove_note_type(name)
+            )
+            row_layout.addWidget(remove_button)
+            row_widget.setLayout(row_layout)
+            self.note_type_list_layout.addWidget(row_widget)
+        self.note_type_list_layout.addStretch()
+
+    def _refresh_add_note_type_combo(self) -> None:
+        selected = set(self.selected_note_type_names)
+        self.add_note_type_combo.blockSignals(True)
+        self.add_note_type_combo.clear()
+        for note_type in self.note_type_names:
+            if note_type not in selected:
+                self.add_note_type_combo.addItem(note_type, note_type)
+        self.add_note_type_combo.blockSignals(False)
+        self.add_note_type_button.setEnabled(self.add_note_type_combo.count() > 0)
+
+    def _refresh_note_type_views(self, preferred_note_type: str | None = None) -> None:
+        self._refresh_note_type_list()
+        self._refresh_add_note_type_combo()
+        self._refresh_note_type_combo(preferred_note_type)
+
+    def _add_selected_note_type(self) -> None:
+        note_type = self.add_note_type_combo.currentData()
+        if not note_type:
+            return
+        note_type = str(note_type)
+        if note_type not in self.selected_note_type_names:
+            self.selected_note_type_names.append(note_type)
+        self._refresh_note_type_views(note_type)
+
+    def _remove_note_type(self, note_type: str) -> None:
+        self.selected_note_type_names = [
+            name for name in self.selected_note_type_names if name != note_type
+        ]
+        self._refresh_note_type_views()
+
+    def _refresh_note_type_combo(self, preferred_note_type: str | None = None) -> None:
+        current_note_type = self.note_type_combo.currentData()
+        selected_note_types = self.selected_note_types()
+        target_note_type = ""
+        if preferred_note_type in selected_note_types:
+            target_note_type = preferred_note_type or ""
+        elif current_note_type in selected_note_types:
+            target_note_type = str(current_note_type)
+        elif selected_note_types:
+            target_note_type = selected_note_types[0]
+
+        self.note_type_combo.blockSignals(True)
+        self.note_type_combo.clear()
+        for note_type in selected_note_types:
+            self.note_type_combo.addItem(note_type, note_type)
+
+        if target_note_type:
+            for index in range(self.note_type_combo.count()):
+                if self.note_type_combo.itemData(index) == target_note_type:
+                    self.note_type_combo.setCurrentIndex(index)
+                    break
+        self.note_type_combo.blockSignals(False)
+        self._render_field_controls()
+
+    def _render_field_controls(self, _index: int | None = None) -> None:
+        self._clear_fields_layout()
+        note_type = self.note_type_combo.currentData()
+        if not note_type:
+            self.fields_layout.addWidget(QLabel("Select at least one note type."), 0, 0)
+            return
+
+        enabled = note_type in self.selected_note_type_names
+        fields = self.field_checkboxes.get(note_type, {})
+        if not fields:
+            self.no_fields_label = QLabel("No fields")
+            self.fields_layout.addWidget(self.no_fields_label, 0, 0)
+            return
+
+        columns = 3
+        for index, (field_name, checkbox) in enumerate(fields.items()):
+            checkbox.setEnabled(enabled)
+            self.fields_layout.addWidget(checkbox, index // columns, index % columns)
+        self.fields_layout.setColumnStretch(columns, 1)
+
+    def selected_decks(self) -> list[str]:
+        if self.all_decks_checkbox.isChecked():
+            return []
+        return [
+            name
+            for name, checkbox in self.deck_checkboxes.items()
+            if checkbox.isChecked()
+        ]
+
+    def selected_note_types(self) -> list[str]:
+        return list(self.selected_note_type_names)
+
+    def selected_fields_by_note_type(self) -> dict[str, list[str]]:
+        fields_by_note_type: dict[str, list[str]] = {}
+        for note_type in self.selected_note_types():
+            fields_by_note_type[note_type] = [
+                field_name
+                for field_name, checkbox in self.field_checkboxes.get(
+                    note_type, {}
+                ).items()
+                if checkbox.isChecked()
+            ]
+        return fields_by_note_type
+
+    def selected_config(self) -> dict:
+        fields_by_note_type = self.selected_fields_by_note_type()
+        fields = []
+        seen_fields = set()
+        for note_type_fields in fields_by_note_type.values():
+            for field_name in note_type_fields:
+                if field_name not in seen_fields:
+                    seen_fields.add(field_name)
+                    fields.append(field_name)
+
+        config = dict(self.config)
+        config.update(
+            {
+                "decks": self.selected_decks(),
+                "note_types": self.selected_note_types(),
+                "fields": fields,
+                "fields_by_note_type": fields_by_note_type,
+                "confirm_before_run": self.confirm_before_run_checkbox.isChecked(),
+                "extract_inline_styles": (
+                    self.extract_inline_styles_checkbox.isChecked()
+                ),
+                "inline_style_min_length": (self.inline_style_min_length_spin.value()),
+                "inline_style_min_ratio": self.inline_style_min_ratio_spin.value(),
+            }
+        )
+        return config
+
+    def validate_selection(self, config: dict) -> None:
+        if not self.all_decks_checkbox.isChecked() and not config["decks"]:
+            raise ValueError("Select at least one deck, or choose All decks.")
+        if not config["note_types"]:
+            raise ValueError("Select at least one note type.")
+        if not config["fields"]:
+            raise ValueError("Select at least one field.")
+
+        missing_fields = [
+            note_type
+            for note_type, fields in config["fields_by_note_type"].items()
+            if not fields
+        ]
+        if missing_fields:
+            names = ", ".join(missing_fields)
+            raise ValueError(f"Select at least one field for: {names}")
+
+    def save_defaults(self) -> None:
+        try:
+            config = self.selected_config()
+            self.validate_selection(config)
+        except Exception as exc:
+            showWarning(str(exc), parent=self)
+            return
+
+        mw.addonManager.writeConfig(__name__, config)
+        self.config = config
+        showInfo("Defaults saved.", parent=self)
+
+    def run_cleanup(self) -> None:
+        try:
+            config = self.selected_config()
+            self.validate_selection(config)
+        except Exception as exc:
+            showWarning(str(exc), parent=self)
+            return
+
+        if config.get("confirm_before_run", True):
+            ok = askUser(
+                "Inline CSS Cleanup will:\n"
+                "• Remove <style>…</style> blocks from the selected fields\n"
+                "• Write merged CSS to collection.media/_extracted_css.css\n"
+                "• Insert <style>@import ...</style> into fields as needed\n\n"
+                "Continue?",
+                parent=self,
+            )
+            if not ok:
+                return
+
+        self.output.setPlainText("Running cleanup...")
+        self.run_button.setEnabled(False)
+        self.save_button.setEnabled(False)
+        CollectionOp(parent=self, op=lambda col: _run_cleanup(col, config)).success(
+            self.on_cleanup_done
+        ).failure(self.on_cleanup_failed).run_in_background()
+
+    def on_cleanup_done(self, result: CleanupResult) -> None:
+        self.output.setPlainText(_format_cleanup_summary(result))
+        self.run_button.setEnabled(True)
+        self.save_button.setEnabled(True)
+
+    def on_cleanup_failed(self, exc: Exception) -> None:
+        message = str(exc)
+        self.output.setPlainText(message)
+        self.run_button.setEnabled(True)
+        self.save_button.setEnabled(True)
+        showWarning(message, parent=self)
 
 
 def on_run_cleanup() -> None:
-    config = _get_config()
-    if config.get("confirm_before_run", True):
-        ok = askUser(
-            "Inline CSS Cleanup will:\n"
-            "• Remove <style>…</style> blocks from the configured fields\n"
-            "• Write merged CSS to collection.media/_extracted_css.css\n"
-            "• Insert <style>@import ...</style> into fields as needed\n\n"
-            "Continue?"
-        )
-        if not ok:
-            return
-
-    CollectionOp(parent=mw, op=_run_cleanup).success(
-        _on_cleanup_done
-    ).run_in_background()
+    dialog = CleanupDialog()
+    dialog.exec()
 
 
 def setup() -> None:
