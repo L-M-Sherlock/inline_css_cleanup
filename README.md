@@ -30,6 +30,17 @@ Option B — Build from source:
 3. In Anki: **Tools → Add-ons → Install from file…**
 4. Select the `.ankiaddon` file and restart Anki
 
+## Release
+
+GitHub Actions builds the add-on on pull requests, pushes to `main`, manual
+runs, and tags matching `v*`.
+
+To publish a release:
+
+1. Create and push a tag such as `v0.1.0`
+2. The workflow builds `dist/inline-css-cleanup.ankiaddon`
+3. The tag run creates or updates the GitHub Release asset automatically
+
 ## Usage
 
 1. **Tools → Inline CSS Cleanup**

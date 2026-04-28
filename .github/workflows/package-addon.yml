@@ -1,0 +1,59 @@
+name: Package Anki Add-on
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    name: Build .ankiaddon
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Compile Python sources
+        run: python -m py_compile __init__.py scripts/validate_anki_addon.py
+
+      - name: Package add-on
+        run: ./package.sh . dist
+
+      - name: Validate add-on archive
+        run: python scripts/validate_anki_addon.py
+
+      - name: Upload add-on artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: inline-css-cleanup-ankiaddon
+          path: dist/inline-css-cleanup.ankiaddon
+          if-no-files-found: error
+
+      - name: Upload direct add-on asset to release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            gh release upload "$TAG_NAME" dist/inline-css-cleanup.ankiaddon --clobber
+          else
+            gh release create "$TAG_NAME" dist/inline-css-cleanup.ankiaddon \
+              --title "$TAG_NAME" \
+              --notes "Automated Inline CSS Cleanup add-on build."
+          fi
