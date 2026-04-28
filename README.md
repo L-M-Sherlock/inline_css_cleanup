@@ -23,7 +23,14 @@ Option A — AnkiWeb code:
 2. Enter the code `465508076`
 3. Restart Anki
 
-Option B — Build from source:
+Option B — GitHub Release:
+
+1. Download `inline-css-cleanup.ankiaddon` from the latest
+   [GitHub Release](https://github.com/L-M-Sherlock/inline_css_cleanup/releases/latest)
+2. In Anki: **Tools → Add-ons → Install from file…**
+3. Select the downloaded `.ankiaddon` file and restart Anki
+
+Option C — Build from source:
 
 1. Download the source code
 2. Run `./package.sh` to build `inline-css-cleanup.ankiaddon`
@@ -37,17 +44,23 @@ runs, and tags matching `v*`.
 
 To publish a release:
 
-1. Create and push a tag such as `v0.1.0`
+1. Create and push a tag such as `v0.2.0`
 2. The workflow builds `dist/inline-css-cleanup.ankiaddon`
 3. The tag run creates or updates the GitHub Release asset automatically
 
 ## Usage
 
 1. **Tools → Inline CSS Cleanup**
-2. Select the decks, note types, and fields to process
-3. Click **Run Cleanup**
-4. Review the summary in the window
-5. Run **Check Database** to shrink the collection file after cleanup
+2. Choose whether to process all decks or select specific decks
+3. Add the target note types in **Target note types**
+4. Pick a note type in **Fields for** and select the fields to clean
+5. Adjust inline-style extraction options if needed
+6. Click **Run Cleanup**
+7. Review the summary in the window
+8. Run **Check Database** to shrink the collection file after cleanup
+
+Use **Save Defaults** to persist the current deck, note type, field, and cleanup
+options to the add-on config.
 
 ## Example Screenshot
 
