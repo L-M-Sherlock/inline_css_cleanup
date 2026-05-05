@@ -28,6 +28,7 @@ from aqt.qt import (
     QScrollArea,
     QSpinBox,
     QTextBrowser,
+    QTimer,
     QVBoxLayout,
     QWidget,
 )
@@ -1148,6 +1149,7 @@ class CleanupDialog(QDialog):
         add_note_type_row = QHBoxLayout()
         self.add_note_type_combo = QComboBox()
         self.add_note_type_button = QPushButton("Add")
+        self.add_note_type_button.setAutoDefault(False)
         self.add_note_type_button.clicked.connect(self._add_selected_note_type)
         add_note_type_row.addWidget(self.add_note_type_combo, 1)
         add_note_type_row.addWidget(self.add_note_type_button)
@@ -1245,10 +1247,12 @@ class CleanupDialog(QDialog):
 
         button_row = QHBoxLayout()
         self.run_button = QPushButton("Run Cleanup")
+        self.run_button.setDefault(True)
         self.run_button.clicked.connect(self.run_cleanup)
         button_row.addWidget(self.run_button)
 
         self.save_button = QPushButton("Save Defaults")
+        self.save_button.setAutoDefault(False)
         self.save_button.clicked.connect(self.save_defaults)
         button_row.addWidget(self.save_button)
         button_row.addStretch()
@@ -1260,6 +1264,7 @@ class CleanupDialog(QDialog):
 
         self.setLayout(layout)
         self._update_deck_controls()
+        QTimer.singleShot(0, self.run_button.setFocus)
 
     def _update_deck_controls(self) -> None:
         enabled = not self.all_decks_checkbox.isChecked()
