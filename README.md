@@ -14,6 +14,7 @@ size limits.
 - Writes the CSS to `collection.media/_extracted_css.css`
 - Inserts a small `<style>@import ...</style>` into the field to load the CSS
 - Optionally extracts repeated `style="..."` attributes into CSS classes
+- Optionally rewrites old Yomitan media references to existing same-content media files
 
 ## Install
 
@@ -59,6 +60,12 @@ To publish a release:
 7. Review the summary in the window
 8. Run **Check Database** to shrink the collection file after cleanup
 
+To fix duplicate media references created by old Yomitan versions, use the same
+deck, note type, and field selectors, then click **Fix Yomitan Media Refs**. This
+uses Anki's media database checksums to point `yomitan_dictionary_media_*` and
+`yomitan_audio_*` references at an existing same-content file. It does not create,
+delete, move, or scan media files.
+
 Use **Save Defaults** to persist the current deck, note type, field, and cleanup
 options to the add-on config.
 
@@ -95,6 +102,7 @@ Quick defaults (from `config.json`):
 - Extracted inline styles are emitted with `!important` to better preserve appearance.
 - Inline style extraction thresholds are based on the number of notes containing inline styles.
 - Extracted CSS is stored in `collection.media/_extracted_css.css` and also mirrored to `user_files/extracted_css.css` (easier to find).
+- Yomitan media repair only rewrites note field references. Use Anki's **Check Media** if you want to review unreferenced duplicate files afterward.
 
 ## License
 

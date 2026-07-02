@@ -2,6 +2,8 @@
 
 This add-on removes inline `<style>...</style>` blocks from selected note fields and
 stores the CSS in `collection.media/_extracted_css.css`, with selector-level deduplication.
+It can also rewrite duplicate old Yomitan media references to existing same-content
+media files.
 
 ## Config Location
 
@@ -97,6 +99,11 @@ If you set a value above 1, it will be treated as a percentage (e.g., `2` = 2%).
 - **User copy**: a mirrored copy is stored at `user_files/extracted_css.css` for easy access.
 - **Idempotent**: running again will not duplicate imports or CSS rules.
 - **Inline style extraction**: extracted inline styles are emitted with `!important`.
+- **Yomitan media repair**: the **Fix Yomitan Media Refs** button uses the same
+  deck, note type, and field selection as cleanup. It reads `collection.media.db2`
+  checksums and rewrites `yomitan_dictionary_media_*` / `yomitan_audio_*`
+  references to an existing same-content file. It does not create, delete, move,
+  or scan media files.
 
 ## Example Config
 

@@ -7,6 +7,7 @@ import html as html_module
 import hashlib
 import math
 import re
+import sqlite3
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,6 +39,9 @@ EXTRACTED_CSS_FILENAME = "_extracted_css.css"
 IMPORT_STYLE_SNIPPET = f'<style>@import url("{EXTRACTED_CSS_FILENAME}");</style>'
 LEGACY_MARKER_START = "/* Inline CSS Cleanup: BEGIN */"
 LEGACY_MARKER_END = "/* Inline CSS Cleanup: END */"
+YOMITAN_DICTIONARY_MEDIA_PREFIX = "yomitan_dictionary_media"
+YOMITAN_AUDIO_PREFIX = "yomitan_audio"
+HOSHI_DICTIONARY_MEDIA_PREFIX = "hoshi_dict"
 
 STYLE_BLOCK_RE = re.compile(r"<style[^>]*>(.*?)</style>", re.IGNORECASE | re.DOTALL)
 HTML_TAG_RE = re.compile(r"<[^>]+>")
@@ -53,6 +57,12 @@ LEGACY_BLOCK_RE = re.compile(
     re.escape(LEGACY_MARKER_START) + r"(.*?)" + re.escape(LEGACY_MARKER_END),
     re.DOTALL,
 )
+SOUND_REF_RE = re.compile(r"\[sound:([^\]\r\n]+)\]", re.IGNORECASE)
+YOMITAN_REF_TEXT_RE = re.compile(
+    rf"{YOMITAN_DICTIONARY_MEDIA_PREFIX}_|{YOMITAN_AUDIO_PREFIX}_",
+    re.IGNORECASE,
+)
+URL_SCHEME_RE = re.compile(r"^[a-z][a-z0-9+.-]*:", re.IGNORECASE)
 
 
 class SelectorDeduper:
@@ -189,6 +199,32 @@ class CleanupResult:
     summaries: list[tuple[str, dict]]
     missing_note_types: list[str]
     missing_decks: list[str]
+
+
+@dataclass
+class YomitanMediaIndex:
+    fname_to_csum: dict[str, str]
+    csum_to_fnames: dict[str, list[str]]
+
+
+@dataclass
+class YomitanMediaDecision:
+    counted: bool
+    new_value: str | None = None
+    source: str | None = None
+    canonical: str | None = None
+    csum: str | None = None
+    skipped: str | None = None
+
+
+@dataclass
+class YomitanMediaRepairResult:
+    changes: OpChanges
+    summaries: list[tuple[str, dict]]
+    missing_note_types: list[str]
+    missing_decks: list[str]
+    media_files_indexed: int
+    media_hashes_indexed: int
 
 
 def _merge_changes(changes: Iterable[OpChanges]) -> OpChanges:
@@ -676,6 +712,244 @@ def _sync_edited_media_files() -> None:
     media_path.touch()
 
 
+def _media_db_path(col) -> Path:
+    return Path(col.media.dir()).parent / "collection.media.db2"
+
+
+def _read_yomitan_media_index(col) -> YomitanMediaIndex:
+    path = _media_db_path(col)
+    if not path.exists():
+        raise Exception(f"Media database not found: {path}")
+
+    uri = f"{path.resolve().as_uri()}?mode=ro&immutable=1"
+    fname_to_csum: dict[str, str] = {}
+    csum_to_fnames: dict[str, list[str]] = {}
+    with sqlite3.connect(uri, uri=True) as db:
+        rows = db.execute(
+            "select fname, csum from media where csum is not null"
+        ).fetchall()
+
+    for fname, csum in rows:
+        fname = str(fname)
+        csum = str(csum).lower()
+        if not fname or not csum:
+            continue
+        fname_to_csum[fname] = csum
+        csum_to_fnames.setdefault(csum, []).append(fname)
+
+    for fnames in csum_to_fnames.values():
+        fnames.sort(key=lambda item: (len(item), item))
+
+    return YomitanMediaIndex(
+        fname_to_csum=fname_to_csum,
+        csum_to_fnames=csum_to_fnames,
+    )
+
+
+def _yomitan_prefix_for_filename(fname: str) -> str | None:
+    if fname.startswith(f"{YOMITAN_DICTIONARY_MEDIA_PREFIX}_"):
+        return YOMITAN_DICTIONARY_MEDIA_PREFIX
+    if fname.startswith(f"{YOMITAN_AUDIO_PREFIX}_"):
+        return YOMITAN_AUDIO_PREFIX
+    return None
+
+
+def _file_extension(fname: str) -> str:
+    dot_index = fname.rfind(".")
+    if dot_index < 0:
+        return ""
+    return fname[dot_index:]
+
+
+def _same_extension(fname: str, extension: str) -> bool:
+    return _file_extension(fname).lower() == extension.lower()
+
+
+def _existing_file_with_name(
+    index: YomitanMediaIndex, csum: str, file_name: str
+) -> str | None:
+    if index.fname_to_csum.get(file_name) == csum:
+        return file_name
+    return None
+
+
+def _canonical_yomitan_media_filename(
+    fname: str, prefix: str, csum: str, index: YomitanMediaIndex
+) -> str | None:
+    extension = _file_extension(fname)
+    same_hash_files = index.csum_to_fnames.get(csum, [])
+    same_extension_files = [
+        candidate
+        for candidate in same_hash_files
+        if _same_extension(candidate, extension)
+    ]
+    if not same_extension_files:
+        return None
+
+    expected_yomitan = f"{prefix}_{csum}{extension.lower()}"
+    existing_yomitan = _existing_file_with_name(index, csum, expected_yomitan)
+    if existing_yomitan is not None:
+        return existing_yomitan
+
+    if prefix == YOMITAN_DICTIONARY_MEDIA_PREFIX:
+        expected_hoshi = f"{HOSHI_DICTIONARY_MEDIA_PREFIX}_{csum}{extension.lower()}"
+        existing_hoshi = _existing_file_with_name(index, csum, expected_hoshi)
+        if existing_hoshi is not None:
+            return existing_hoshi
+
+    return same_extension_files[0]
+
+
+def _looks_like_yomitan_ref(value: str) -> bool:
+    return bool(YOMITAN_REF_TEXT_RE.search(html_module.unescape(value)))
+
+
+def _yomitan_media_decision(
+    value: str, index: YomitanMediaIndex
+) -> YomitanMediaDecision:
+    if not _looks_like_yomitan_ref(value):
+        return YomitanMediaDecision(counted=False)
+
+    fname = html_module.unescape(value).strip()
+    if not fname:
+        return YomitanMediaDecision(counted=True, skipped="unsupported_ref")
+    if URL_SCHEME_RE.search(fname) or fname.startswith("//"):
+        return YomitanMediaDecision(counted=True, skipped="external_or_data_url")
+    if any(separator in fname for separator in ("/", "\\", "?", "#")):
+        return YomitanMediaDecision(
+            counted=True, source=fname, skipped="unsupported_ref"
+        )
+
+    prefix = _yomitan_prefix_for_filename(fname)
+    if prefix is None:
+        return YomitanMediaDecision(
+            counted=True, source=fname, skipped="unsupported_ref"
+        )
+
+    csum = index.fname_to_csum.get(fname)
+    if not csum:
+        return YomitanMediaDecision(
+            counted=True, source=fname, skipped="missing_or_no_csum"
+        )
+
+    canonical = _canonical_yomitan_media_filename(fname, prefix, csum, index)
+    if canonical is None:
+        return YomitanMediaDecision(
+            counted=True,
+            source=fname,
+            csum=csum,
+            skipped="no_canonical_candidate",
+        )
+    if canonical == fname:
+        return YomitanMediaDecision(
+            counted=True,
+            source=fname,
+            canonical=canonical,
+            csum=csum,
+            skipped="already_canonical",
+        )
+
+    return YomitanMediaDecision(
+        counted=True,
+        new_value=canonical,
+        source=fname,
+        canonical=canonical,
+        csum=csum,
+    )
+
+
+def _new_yomitan_media_summary(total: int = 0) -> dict:
+    return {
+        "updated_notes": 0,
+        "refs_seen": 0,
+        "replacements": 0,
+        "source_files": set(),
+        "hashes": set(),
+        "canonical_counts": Counter(),
+        "skipped": Counter(),
+        "cancelled": False,
+        "processed": 0,
+        "total": total,
+    }
+
+
+def _record_yomitan_media_decision(
+    summary: dict, decision: YomitanMediaDecision
+) -> None:
+    if not decision.counted:
+        return
+
+    summary["refs_seen"] += 1
+    if decision.new_value is None:
+        summary["skipped"][decision.skipped or "unchanged"] += 1
+        return
+
+    summary["replacements"] += 1
+    if decision.source:
+        summary["source_files"].add(decision.source)
+    if decision.csum:
+        summary["hashes"].add(decision.csum)
+    if decision.csum and decision.canonical:
+        summary["canonical_counts"][(decision.csum, decision.canonical)] += 1
+
+
+def _replace_yomitan_media_value(
+    value: str, index: YomitanMediaIndex, summary: dict
+) -> tuple[str, bool]:
+    decision = _yomitan_media_decision(value, index)
+    _record_yomitan_media_decision(summary, decision)
+    if decision.new_value is None:
+        return value, False
+    return decision.new_value, True
+
+
+def _repair_yomitan_media_refs_in_text(
+    text: str, index: YomitanMediaIndex, summary: dict
+) -> tuple[str, bool]:
+    if not YOMITAN_REF_TEXT_RE.search(text):
+        return text, False
+
+    changed = False
+
+    def replace_tag(match: re.Match) -> str:
+        nonlocal changed
+        tag = match.group(0)
+        parsed = _parse_opening_tag(tag)
+        if not parsed:
+            return tag
+
+        tag_name, attrs, self_close = parsed
+        new_attrs: list[tuple[str, str | None, str | None]] = []
+        tag_changed = False
+        for name, value, quote in attrs:
+            if name.lower() in {"src", "href"} and value is not None:
+                value, value_changed = _replace_yomitan_media_value(
+                    value, index, summary
+                )
+                if value_changed:
+                    tag_changed = True
+                    changed = True
+            new_attrs.append((name, value, quote))
+
+        if not tag_changed:
+            return tag
+        return _format_opening_tag(tag_name, new_attrs, self_close)
+
+    repaired = TAG_RE.sub(replace_tag, text)
+
+    def replace_sound(match: re.Match) -> str:
+        nonlocal changed
+        value = match.group(1)
+        new_value, value_changed = _replace_yomitan_media_value(value, index, summary)
+        if not value_changed:
+            return match.group(0)
+        changed = True
+        return f"[sound:{new_value}]"
+
+    repaired = SOUND_REF_RE.sub(replace_sound, repaired)
+    return repaired, changed
+
+
 def _merge_css_sources(*sources: str) -> str:
     deduper = SelectorDeduper()
     for css in sources:
@@ -1020,6 +1294,121 @@ def _run_cleanup(col, config: dict | None = None) -> CleanupResult:
     )
 
 
+def _repair_yomitan_media_refs_for_model(
+    col,
+    model,
+    fields: list[str],
+    deck_ids: set[int] | None,
+    media_index: YomitanMediaIndex,
+):
+    nids = _note_ids_for_model(col, model["id"], deck_ids)
+    total = len(nids)
+    summary = _new_yomitan_media_summary(total)
+    notes_to_update = {}
+
+    if total:
+        mw.taskman.run_on_main(
+            lambda total=total, name=model["name"]: mw.progress.start(
+                label=f"Yomitan Media Repair — {name}",
+                max=total,
+                immediate=True,
+            )
+        )
+
+    processed = 0
+    for nid in nids:
+        note = col.get_note(nid)
+        changed = False
+        for fname in fields:
+            if fname not in note:
+                continue
+            old = note[fname]
+            new, field_changed = _repair_yomitan_media_refs_in_text(
+                old, media_index, summary
+            )
+            if field_changed:
+                note[fname] = new
+                changed = True
+
+        if changed:
+            notes_to_update[note.id] = note
+
+        processed += 1
+        if processed % 200 == 0 or processed == total:
+            mw.taskman.run_on_main(
+                lambda count=processed, total=total, name=model["name"]: (
+                    mw.progress.update(
+                        label=f"Yomitan Media Repair — {name} ({count}/{total})",
+                        value=count,
+                        max=total,
+                    )
+                )
+            )
+            if mw.progress.want_cancel():
+                summary["cancelled"] = True
+                break
+
+    if total:
+        mw.taskman.run_on_main(lambda: mw.progress.finish())
+
+    changes_list: list[OpChanges] = []
+    if notes_to_update:
+        changes_list.append(col.update_notes(list(notes_to_update.values())))
+
+    summary["updated_notes"] = len(notes_to_update)
+    summary["processed"] = processed
+    return summary, _merge_changes(changes_list)
+
+
+def _run_yomitan_media_repair(
+    col, config: dict | None = None
+) -> YomitanMediaRepairResult:
+    config = config or _get_config()
+    note_types = _string_list(config.get("note_types", []))
+    configured_decks = _string_list(config.get("decks", []))
+    configured_fields = _string_list(config.get("fields", []))
+    fields_by_note_type = _configured_fields_by_note_type(config)
+
+    if not configured_fields and not any(fields_by_note_type.values()):
+        raise Exception("No target fields configured.")
+
+    media_index = _read_yomitan_media_index(col)
+    deck_ids, missing_decks = _matching_deck_ids(col, configured_decks)
+
+    models = []
+    missing_note_types: list[str] = []
+    if note_types:
+        for name in note_types:
+            model = col.models.by_name(name)
+            if not model:
+                missing_note_types.append(name)
+                continue
+            models.append(model)
+    else:
+        models = list(col.models.all())
+
+    summaries: list[tuple[str, dict]] = []
+    all_changes: list[OpChanges] = []
+    for model in models:
+        fields = _fields_for_model(config, model["name"])
+        if not fields:
+            continue
+        summary, changes = _repair_yomitan_media_refs_for_model(
+            col, model, fields, deck_ids, media_index
+        )
+        summaries.append((model["name"], summary))
+        all_changes.append(changes)
+
+    return YomitanMediaRepairResult(
+        changes=_merge_changes(all_changes),
+        summaries=summaries,
+        missing_note_types=missing_note_types,
+        missing_decks=missing_decks,
+        media_files_indexed=len(media_index.fname_to_csum),
+        media_hashes_indexed=len(media_index.csum_to_fnames),
+    )
+
+
 def _format_cleanup_summary(result: CleanupResult) -> str:
     def fmt_bytes(n: int) -> str:
         if n >= 1024 * 1024:
@@ -1078,6 +1467,59 @@ def _format_cleanup_summary(result: CleanupResult) -> str:
         lines.append(f"Missing decks (skipped): {missing}")
 
     lines.append("After cleanup, run Tools → Check Database to shrink the collection.")
+    return "\n".join(lines).strip()
+
+
+def _format_yomitan_media_repair_summary(result: YomitanMediaRepairResult) -> str:
+    lines: list[str] = []
+    lines.append(
+        "Media DB indexed: "
+        f"{result.media_files_indexed} files, "
+        f"{result.media_hashes_indexed} hashes"
+    )
+    lines.append("")
+
+    if not result.summaries:
+        lines.append("No matching note types were processed.")
+
+    for name, s in result.summaries:
+        lines.append(f"Note type: {name}")
+        if s.get("total"):
+            lines.append(f"  Progress: {s.get('processed', 0)}/{s.get('total', 0)}")
+        if s.get("cancelled"):
+            lines.append("  Cancelled: yes")
+        lines.append(f"  Notes updated: {s['updated_notes']}")
+        lines.append(f"  Yomitan refs scanned: {s['refs_seen']}")
+        lines.append(f"  Replacements: {s['replacements']}")
+        lines.append(f"  Unique replaced source files: {len(s['source_files'])}")
+        lines.append(f"  Unique replaced hashes: {len(s['hashes'])}")
+
+        skipped = s.get("skipped")
+        if skipped:
+            skipped_text = ", ".join(
+                f"{reason}={count}" for reason, count in skipped.most_common()
+            )
+            lines.append(f"  Skipped: {skipped_text}")
+
+        canonical_counts = s.get("canonical_counts")
+        if canonical_counts:
+            lines.append("  Top canonical targets:")
+            for (csum, canonical), count in canonical_counts.most_common(8):
+                lines.append(f"    {count}x -> {canonical} ({csum[:8]})")
+        lines.append("")
+
+    if result.missing_note_types:
+        missing = ", ".join(result.missing_note_types)
+        lines.append(f"Missing note types (skipped): {missing}")
+
+    if result.missing_decks:
+        missing = ", ".join(result.missing_decks)
+        lines.append(f"Missing decks (skipped): {missing}")
+
+    lines.append("No media files were created, deleted, or moved.")
+    lines.append(
+        "Run Tools → Check Media if you want Anki to list unreferenced copies."
+    )
     return "\n".join(lines).strip()
 
 
@@ -1251,6 +1693,11 @@ class CleanupDialog(QDialog):
         self.run_button.clicked.connect(self.run_cleanup)
         button_row.addWidget(self.run_button)
 
+        self.fix_yomitan_media_button = QPushButton("Fix Yomitan Media Refs")
+        self.fix_yomitan_media_button.setAutoDefault(False)
+        self.fix_yomitan_media_button.clicked.connect(self.run_yomitan_media_repair)
+        button_row.addWidget(self.fix_yomitan_media_button)
+
         self.save_button = QPushButton("Save Defaults")
         self.save_button.setAutoDefault(False)
         self.save_button.clicked.connect(self.save_defaults)
@@ -1265,6 +1712,11 @@ class CleanupDialog(QDialog):
         self.setLayout(layout)
         self._update_deck_controls()
         QTimer.singleShot(0, self.run_button.setFocus)
+
+    def _set_buttons_enabled(self, enabled: bool) -> None:
+        self.run_button.setEnabled(enabled)
+        self.fix_yomitan_media_button.setEnabled(enabled)
+        self.save_button.setEnabled(enabled)
 
     def _update_deck_controls(self) -> None:
         enabled = not self.all_decks_checkbox.isChecked()
@@ -1478,22 +1930,58 @@ class CleanupDialog(QDialog):
                 return
 
         self.output.setPlainText("Running cleanup...")
-        self.run_button.setEnabled(False)
-        self.save_button.setEnabled(False)
+        self._set_buttons_enabled(False)
         CollectionOp(parent=self, op=lambda col: _run_cleanup(col, config)).success(
             self.on_cleanup_done
         ).failure(self.on_cleanup_failed).run_in_background()
 
     def on_cleanup_done(self, result: CleanupResult) -> None:
         self.output.setPlainText(_format_cleanup_summary(result))
-        self.run_button.setEnabled(True)
-        self.save_button.setEnabled(True)
+        self._set_buttons_enabled(True)
 
     def on_cleanup_failed(self, exc: Exception) -> None:
         message = str(exc)
         self.output.setPlainText(message)
-        self.run_button.setEnabled(True)
-        self.save_button.setEnabled(True)
+        self._set_buttons_enabled(True)
+        showWarning(message, parent=self)
+
+    def run_yomitan_media_repair(self) -> None:
+        try:
+            config = self.selected_config()
+            self.validate_selection(config)
+        except Exception as exc:
+            showWarning(str(exc), parent=self)
+            return
+
+        if config.get("confirm_before_run", True):
+            ok = askUser(
+                "Yomitan media repair will:\n"
+                "• Rewrite old Yomitan media references in the selected fields\n"
+                "• Use collection.media.db2 checksums to find same-content files\n"
+                "• Not create, delete, or move media files\n\n"
+                "Continue?",
+                parent=self,
+            )
+            if not ok:
+                return
+
+        self.output.setPlainText("Repairing Yomitan media references...")
+        self._set_buttons_enabled(False)
+        CollectionOp(
+            parent=self,
+            op=lambda col: _run_yomitan_media_repair(col, config),
+        ).success(self.on_yomitan_media_repair_done).failure(
+            self.on_yomitan_media_repair_failed
+        ).run_in_background()
+
+    def on_yomitan_media_repair_done(self, result: YomitanMediaRepairResult) -> None:
+        self.output.setPlainText(_format_yomitan_media_repair_summary(result))
+        self._set_buttons_enabled(True)
+
+    def on_yomitan_media_repair_failed(self, exc: Exception) -> None:
+        message = str(exc)
+        self.output.setPlainText(message)
+        self._set_buttons_enabled(True)
         showWarning(message, parent=self)
 
 
