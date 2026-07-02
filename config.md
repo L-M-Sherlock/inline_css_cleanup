@@ -91,6 +91,18 @@ If you set a value above 1, it will be treated as a percentage (e.g., `2` = 2%).
 - Example:
   - `"inline_style_min_ratio": 0.05`
 
+### `extract_data_image_sources`
+Type: `boolean`
+
+Whether to extract `<img src="data:image/...;base64,...">` sources into Anki media
+files and rewrite the `src` attributes to those filenames.
+
+Extracted files are named `hoshi_dict_<sha1>.<ext>`, matching Hoshi Reader's
+AnkiConnect dictionary media naming.
+
+- Example:
+  - `"extract_data_image_sources": false`
+
 ## Behavior Notes
 
 - **Selector-level deduplication**: if the same selector appears multiple times,
@@ -99,6 +111,8 @@ If you set a value above 1, it will be treated as a percentage (e.g., `2` = 2%).
 - **User copy**: a mirrored copy is stored at `user_files/extracted_css.css` for easy access.
 - **Idempotent**: running again will not duplicate imports or CSS rules.
 - **Inline style extraction**: extracted inline styles are emitted with `!important`.
+- **Data image extraction**: extracted `<img>` data images are written to
+  `collection.media` and referenced by `hoshi_dict_<sha1>.<ext>` filenames.
 - **Yomitan media repair**: the **Fix Yomitan Media Refs** button uses the same
   deck, note type, and field selection as cleanup. It reads `collection.media.db2`
   checksums and rewrites `yomitan_dictionary_media_*` / `yomitan_audio_*`
@@ -117,6 +131,7 @@ If you set a value above 1, it will be treated as a percentage (e.g., `2` = 2%).
   },
   "confirm_before_run": true,
   "extract_inline_styles": false,
+  "extract_data_image_sources": false,
   "inline_style_min_length": 80,
   "inline_style_min_ratio": 0.05
 }

@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import html as html_module
 import hashlib
 import math
@@ -42,6 +44,17 @@ LEGACY_MARKER_END = "/* Inline CSS Cleanup: END */"
 YOMITAN_DICTIONARY_MEDIA_PREFIX = "yomitan_dictionary_media"
 YOMITAN_AUDIO_PREFIX = "yomitan_audio"
 HOSHI_DICTIONARY_MEDIA_PREFIX = "hoshi_dict"
+DATA_IMAGE_MIME_EXTENSIONS = {
+    "image/avif": "avif",
+    "image/bmp": "bmp",
+    "image/gif": "gif",
+    "image/jpeg": "jpg",
+    "image/jpg": "jpg",
+    "image/png": "png",
+    "image/svg+xml": "svg",
+    "image/webp": "webp",
+    "image/x-icon": "ico",
+}
 
 STYLE_BLOCK_RE = re.compile(r"<style[^>]*>(.*?)</style>", re.IGNORECASE | re.DOTALL)
 HTML_TAG_RE = re.compile(r"<[^>]+>")
@@ -261,6 +274,7 @@ def _get_config() -> dict:
     config.setdefault("extract_inline_styles", False)
     config.setdefault("inline_style_min_length", 80)
     config.setdefault("inline_style_min_ratio", 0.05)
+    config.setdefault("extract_data_image_sources", False)
     return config
 
 
@@ -701,6 +715,150 @@ def _apply_inline_style_extraction(
     return new_html, removed_bytes, extracted
 
 
+@dataclass
+class DataImageSource:
+    filename: str
+    data: bytes
+
+
+@dataclass
+class DataImageExtractionResult:
+    new_value: str
+    refs_seen: int
+    extracted: int
+    files_written: int
+    removed_bytes: int
+    skipped: Counter
+
+
+def _data_image_source_from_value(
+    value: str,
+) -> tuple[DataImageSource | None, str | None]:
+    raw = html_module.unescape(value).strip()
+    if not raw.lower().startswith("data:image/"):
+        return None, None
+    if "," not in raw:
+        return None, "malformed_data_uri"
+
+    header, payload = raw.split(",", 1)
+    media_type = header[5:]
+    parts = [part.strip().lower() for part in media_type.split(";") if part.strip()]
+    if not parts:
+        return None, "missing_mime"
+
+    mime = parts[0]
+    extension = DATA_IMAGE_MIME_EXTENSIONS.get(mime)
+    if extension is None:
+        return None, "unsupported_mime"
+    if "base64" not in parts[1:]:
+        return None, "not_base64"
+
+    encoded = re.sub(r"\s+", "", payload)
+    if not encoded:
+        return None, "empty_data"
+
+    padding = (-len(encoded)) % 4
+    if padding:
+        encoded += "=" * padding
+
+    try:
+        data = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError):
+        return None, "invalid_base64"
+
+    if not data:
+        return None, "empty_data"
+
+    digest = hashlib.sha1(data).hexdigest()
+    filename = f"{HOSHI_DICTIONARY_MEDIA_PREFIX}_{digest}.{extension}"
+    return DataImageSource(filename=filename, data=data), None
+
+
+def _write_data_image_media_file(
+    media_dir: Path, source: DataImageSource
+) -> tuple[bool, str | None]:
+    path = media_dir / source.filename
+    if path.exists():
+        if path.read_bytes() == source.data:
+            return False, None
+        return False, "filename_collision"
+
+    path.write_bytes(source.data)
+    return True, None
+
+
+def _apply_data_image_extraction(
+    html: str, media_dir: Path
+) -> DataImageExtractionResult:
+    skipped: Counter[str] = Counter()
+    if "data:image/" not in html.lower():
+        return DataImageExtractionResult(
+            new_value=html,
+            refs_seen=0,
+            extracted=0,
+            files_written=0,
+            removed_bytes=0,
+            skipped=skipped,
+        )
+
+    refs_seen = 0
+    extracted = 0
+    files_written = 0
+    removed_bytes = 0
+
+    def repl(match: re.Match) -> str:
+        nonlocal refs_seen, extracted, files_written, removed_bytes
+        tag = match.group(0)
+        parsed = _parse_opening_tag(tag)
+        if not parsed:
+            return tag
+
+        tag_name, attrs, self_close = parsed
+        if tag_name.lower() != "img":
+            return tag
+
+        src_index = None
+        for index, (name, value, _quote) in enumerate(attrs):
+            if name.lower() == "src" and value is not None:
+                raw_value = html_module.unescape(value).strip()
+                if raw_value.lower().startswith("data:image/"):
+                    src_index = index
+                break
+
+        if src_index is None:
+            return tag
+
+        refs_seen += 1
+        name, value, quote = attrs[src_index]
+        source, skip_reason = _data_image_source_from_value(value or "")
+        if source is None:
+            skipped[skip_reason or "unsupported_data_uri"] += 1
+            return tag
+
+        wrote_file, skip_reason = _write_data_image_media_file(media_dir, source)
+        if skip_reason:
+            skipped[skip_reason] += 1
+            return tag
+        if wrote_file:
+            files_written += 1
+
+        attrs[src_index] = (name, source.filename, quote)
+        new_tag = _format_opening_tag(tag_name, attrs, self_close)
+        removed_bytes += len(tag) - len(new_tag)
+        extracted += 1
+        return new_tag
+
+    new_html = TAG_RE.sub(repl, html)
+    return DataImageExtractionResult(
+        new_value=new_html,
+        refs_seen=refs_seen,
+        extracted=extracted,
+        files_written=files_written,
+        removed_bytes=removed_bytes,
+        skipped=skipped,
+    )
+
+
 def _read_text(path: Path) -> str:
     if path.exists():
         return path.read_text(encoding="utf-8")
@@ -1086,11 +1244,17 @@ def _cleanup_model(
     removed_bytes = 0
     inline_style_removed_bytes = 0
     inline_style_extracted = 0
+    data_image_removed_bytes = 0
+    data_image_refs_seen = 0
+    data_image_extracted = 0
+    data_image_files_written = 0
+    data_image_skipped: Counter[str] = Counter()
     style_blocks = 0
     notes_to_update = {}
     cancelled = False
 
     media_css_path = _media_css_path(col)
+    media_dir = media_css_path.parent
     user_css_path = _user_css_path()
     existing_media_css = _read_text(media_css_path)
     existing_user_css = _read_text(user_css_path)
@@ -1110,6 +1274,7 @@ def _cleanup_model(
     inline_style_min_count = 0
     inline_style_selected = 0
     inline_style_map: dict[str, str] = {}
+    extract_data_image_sources = bool(config.get("extract_data_image_sources", False))
     if config.get("extract_inline_styles", False):
         (
             inline_style_counts,
@@ -1175,6 +1340,18 @@ def _cleanup_model(
                         new_value = IMPORT_STYLE_SNIPPET + new_value
                     note[fname] = new_value
                     changed = True
+            if extract_data_image_sources:
+                current = note[fname]
+                data_image_result = _apply_data_image_extraction(current, media_dir)
+                data_image_refs_seen += data_image_result.refs_seen
+                data_image_extracted += data_image_result.extracted
+                data_image_files_written += data_image_result.files_written
+                data_image_removed_bytes += data_image_result.removed_bytes
+                data_image_skipped.update(data_image_result.skipped)
+                if data_image_result.extracted:
+                    removed_bytes += data_image_result.removed_bytes
+                    note[fname] = data_image_result.new_value
+                    changed = True
         if changed:
             notes_to_update[note.id] = note
             updated_notes += 1
@@ -1217,6 +1394,9 @@ def _cleanup_model(
         media_css_path.write_text(merged_media_css, encoding="utf-8")
         _sync_edited_media_files()
 
+    if data_image_files_written:
+        _sync_edited_media_files()
+
     user_css_updated = merged_media_css != existing_user_css
     if user_css_updated:
         user_css_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1237,6 +1417,11 @@ def _cleanup_model(
         "inline_style_selected": inline_style_selected,
         "inline_style_extracted": inline_style_extracted,
         "inline_style_removed_bytes": inline_style_removed_bytes,
+        "data_image_refs_seen": data_image_refs_seen,
+        "data_image_extracted": data_image_extracted,
+        "data_image_files_written": data_image_files_written,
+        "data_image_removed_bytes": data_image_removed_bytes,
+        "data_image_skipped": data_image_skipped,
         "unique_selectors": deduper.unique_rules,
         "total_rules": deduper.total_rules,
         "unique_statements": deduper.unique_statements,
@@ -1446,6 +1631,22 @@ def _format_cleanup_summary(result: CleanupResult) -> str:
                 "  Inline style bytes removed: "
                 f"{fmt_bytes(s['inline_style_removed_bytes'])}"
             )
+        if s.get("data_image_refs_seen"):
+            lines.append(f"  Data image refs found: {s['data_image_refs_seen']}")
+            lines.append(f"  Data image refs extracted: {s['data_image_extracted']}")
+            lines.append(
+                f"  Data image media files written: {s['data_image_files_written']}"
+            )
+            lines.append(
+                "  Data image bytes removed: "
+                f"{fmt_bytes(s['data_image_removed_bytes'])}"
+            )
+            skipped = s.get("data_image_skipped")
+            if skipped:
+                skipped_text = ", ".join(
+                    f"{reason}={count}" for reason, count in skipped.most_common()
+                )
+                lines.append(f"  Data image refs skipped: {skipped_text}")
         lines.append(
             f"  Unique selectors: {s['unique_selectors']} (from {s['total_rules']} rules)"
         )
@@ -1661,6 +1862,12 @@ class CleanupDialog(QDialog):
         )
         option_row.addWidget(self.extract_inline_styles_checkbox)
 
+        self.extract_data_image_sources_checkbox = QCheckBox("Extract data images")
+        self.extract_data_image_sources_checkbox.setChecked(
+            bool(self.config.get("extract_data_image_sources", False))
+        )
+        option_row.addWidget(self.extract_data_image_sources_checkbox)
+
         option_row.addWidget(QLabel("Min length"))
         self.inline_style_min_length_spin = QSpinBox()
         self.inline_style_min_length_spin.setRange(0, 100000)
@@ -1874,6 +2081,9 @@ class CleanupDialog(QDialog):
                 "extract_inline_styles": (
                     self.extract_inline_styles_checkbox.isChecked()
                 ),
+                "extract_data_image_sources": (
+                    self.extract_data_image_sources_checkbox.isChecked()
+                ),
                 "inline_style_min_length": (self.inline_style_min_length_spin.value()),
                 "inline_style_min_ratio": self.inline_style_min_ratio_spin.value(),
             }
@@ -1922,6 +2132,7 @@ class CleanupDialog(QDialog):
                 "Inline CSS Cleanup will:\n"
                 "• Remove <style>…</style> blocks from the selected fields\n"
                 "• Write merged CSS to collection.media/_extracted_css.css\n"
+                "• Optionally extract data:image sources to collection.media\n"
                 "• Insert <style>@import ...</style> into fields as needed\n\n"
                 "Continue?",
                 parent=self,

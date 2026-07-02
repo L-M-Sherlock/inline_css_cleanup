@@ -14,6 +14,7 @@ size limits.
 - Writes the CSS to `collection.media/_extracted_css.css`
 - Inserts a small `<style>@import ...</style>` into the field to load the CSS
 - Optionally extracts repeated `style="..."` attributes into CSS classes
+- Optionally extracts embedded `data:image/...;base64,...` image sources to media files
 - Optionally rewrites old Yomitan media references to existing same-content media files
 
 ## Install
@@ -89,6 +90,7 @@ Quick defaults (from `config.json`):
   },
   "confirm_before_run": true,
   "extract_inline_styles": false,
+  "extract_data_image_sources": false,
   "inline_style_min_length": 80,
   "inline_style_min_ratio": 0.05
 }
@@ -101,6 +103,8 @@ Quick defaults (from `config.json`):
 - Consider backing up your collection before the first run.
 - Extracted inline styles are emitted with `!important` to better preserve appearance.
 - Inline style extraction thresholds are based on the number of notes containing inline styles.
+- Extracted data images are stored as `hoshi_dict_<sha1>.<ext>` media files,
+  matching Hoshi Reader's AnkiConnect dictionary media naming.
 - Extracted CSS is stored in `collection.media/_extracted_css.css` and also mirrored to `user_files/extracted_css.css` (easier to find).
 - Yomitan media repair only rewrites note field references. Use Anki's **Check Media** if you want to review unreferenced duplicate files afterward.
 
