@@ -9,6 +9,18 @@
 
 There are no tests or additional assets in this repository.
 
+## Anki Database Safety
+
+- Never directly modify `collection.anki2`, `collection.media.db2`, or related
+  Anki profile databases while Anki is running.
+- Before any external script or SQLite command writes to an Anki database, first
+  ask the user to close Anki and wait for confirmation.
+- Prefer implementing data changes through the add-on using Anki/aqt collection
+  APIs. Direct database writes are only acceptable for explicit repair tasks
+  after Anki has been closed and a backup has been created.
+- Read-only inspection is acceptable, but do not use it as a reason to proceed
+  with writes while Anki is open.
+
 ## Build, Test, and Development Commands
 
 - `./package.sh`
